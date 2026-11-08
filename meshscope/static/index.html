@@ -1,0 +1,177 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>MeshScope</title>
+<link rel="icon" href="icon.png">
+<link rel="stylesheet" href="vendor/leaflet/leaflet.css">
+<link rel="stylesheet" href="app.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand"><img src="icon.png" alt=""><span>MeshScope</span></div>
+  <nav class="tabs" id="tabs">
+    <button data-tab="nodes" class="active">Nodes</button>
+    <button data-tab="map">Map</button>
+    <button data-tab="topology">Topology</button>
+    <button data-tab="reach">Reach</button>
+    <button data-tab="activity">Activity <span class="badge" id="pendingBadge" hidden></span></button>
+  </nav>
+  <div class="conn">
+    <span class="pill" id="statusPill">Disconnected</span>
+    <select id="portSelect" title="USB serial port"></select>
+    <button id="refreshPorts" class="icon-btn" title="Rescan USB ports">&#x21bb;</button>
+    <button id="connectBtn" class="primary">Connect</button>
+    <button id="demoBtn" title="Explore the app with a simulated mesh">Demo</button>
+    <button id="disconnectBtn" hidden>Disconnect</button>
+  </div>
+</header>
+
+<div class="status-detail" id="statusDetail" hidden></div>
+
+<main>
+  <!-- NODES -->
+  <section class="view active" id="view-nodes">
+    <div class="toolbar">
+      <input type="search" id="nodeSearch" placeholder="Search name, ID, hardware...">
+      <label>Heard within
+        <select id="nodeAge">
+          <option value="0">any time</option>
+          <option value="3600">1 hour</option>
+          <option value="21600">6 hours</option>
+          <option value="86400" selected>24 hours</option>
+          <option value="604800">7 days</option>
+        </select>
+      </label>
+      <label class="chk"><input type="checkbox" id="hideMqtt"> Hide MQTT</label>
+      <span class="spacer"></span>
+      <span class="muted" id="nodeCount"></span>
+    </div>
+    <div class="table-wrap">
+      <table class="nodes" id="nodeTable">
+        <thead><tr>
+          <th data-sort="name">Node</th>
+          <th data-sort="id">ID</th>
+          <th data-sort="hopsAway" class="num">Hops</th>
+          <th data-sort="snr" class="num">SNR</th>
+          <th data-sort="lastHeard">Last heard</th>
+          <th data-sort="dist" class="num">Distance</th>
+          <th data-sort="battery" class="num">Battery</th>
+          <th data-sort="hwModel">Hardware</th>
+          <th data-sort="role">Role</th>
+          <th>Actions</th>
+        </tr></thead>
+        <tbody></tbody>
+      </table>
+      <div class="empty" id="nodesEmpty" hidden>
+        <h2>No nodes yet</h2>
+        <p>Plug your Meshtastic radio in over USB, pick its COM port above and press <b>Connect</b>.<br>
+          Or press <b>Demo</b> to explore with a simulated mesh.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- MAP -->
+  <section class="view" id="view-map">
+    <div class="map-tools">
+      <label class="chk"><input type="checkbox" id="mapLinks" checked> Links</label>
+      <label class="chk"><input type="checkbox" id="mapLabels" checked> Labels</label>
+      <label>Link age
+        <select id="mapLinkAge">
+          <option value="3600">1 h</option>
+          <option value="86400" selected>24 h</option>
+          <option value="604800">7 d</option>
+          <option value="0">all</option>
+        </select>
+      </label>
+      <button id="mapFit">Fit nodes</button>
+      <div class="legend">
+        <b>Hops</b><i style="--c:var(--local)"></i>local<i style="--c:var(--h0)"></i>0<i style="--c:var(--h1)"></i>1<i style="--c:var(--h2)"></i>2<i style="--c:var(--h3)"></i>3+
+        <b>SNR</b><s style="--c:#22c55e"></s>&ge;5<s style="--c:#a3e635"></s>0<s style="--c:#eab308"></s>-7<s style="--c:#f97316"></s>-13<s style="--c:#ef4444"></s>worse<s style="--c:#64748b"></s>?
+      </div>
+    </div>
+    <div id="map" class="map"></div>
+    <div class="map-note" id="mapNote" hidden></div>
+  </section>
+
+  <!-- TOPOLOGY -->
+  <section class="view" id="view-topology">
+    <div class="map-tools">
+      <label>Link age
+        <select id="topoLinkAge">
+          <option value="3600">1 h</option>
+          <option value="86400" selected>24 h</option>
+          <option value="604800">7 d</option>
+          <option value="0">all</option>
+        </select>
+      </label>
+      <label class="chk"><input type="checkbox" id="topoIsolated"> Show unlinked nodes</label>
+      <button id="topoRelayout">Re-layout</button>
+      <span class="muted">Scroll to zoom, drag the background to pan, drag nodes to arrange. Includes nodes without GPS.</span>
+    </div>
+    <svg id="graph" class="graph"></svg>
+  </section>
+
+  <!-- REACH -->
+  <section class="view" id="view-reach">
+    <div class="reach-layout">
+      <aside class="reach-panel">
+        <h3>Message reach</h3>
+        <p class="muted small">Meshtastic floods each packet: every node that hears it rebroadcasts until the hop limit runs out.
+          This simulates that flood over the radio links MeshScope has observed.</p>
+        <label class="field">Origin node
+          <select id="reachOrigin"></select>
+        </label>
+        <label class="field">Hop limit: <b id="reachHopsVal">3</b>
+          <input type="range" id="reachHops" min="0" max="7" value="3">
+        </label>
+        <label class="field">Links seen within
+          <select id="reachAge">
+            <option value="1">1 hour</option>
+            <option value="24" selected>24 hours</option>
+            <option value="168">7 days</option>
+            <option value="0">any time</option>
+          </select>
+        </label>
+        <label class="chk"><input type="checkbox" id="reachBidir" checked> Assume links are two-way</label>
+        <label class="chk"><input type="checkbox" id="reachCircles" checked> Coverage circles</label>
+        <label class="field">Fallback radius for nodes with no measured link: <b id="reachRadiusVal">2</b> km
+          <input type="range" id="reachRadius" min="0" max="15" step="0.5" value="2">
+        </label>
+        <div id="reachStats" class="reach-stats"></div>
+      </aside>
+      <div class="reach-mapwrap">
+        <div id="reachMap" class="map"></div>
+        <div class="legend floating" id="reachLegend"></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- ACTIVITY -->
+  <section class="view" id="view-activity">
+    <div class="activity">
+      <div class="col">
+        <h3>Requests</h3>
+        <div id="jobs" class="jobs"></div>
+      </div>
+      <div class="col">
+        <h3>Packets <label class="chk small"><input type="checkbox" id="logRxOnly"> received only</label></h3>
+        <div id="log" class="log"></div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<!-- Node detail drawer -->
+<aside class="drawer" id="drawer" hidden>
+  <button class="close icon-btn" id="drawerClose" title="Close">&times;</button>
+  <div id="drawerBody"></div>
+</aside>
+
+<div class="toasts" id="toasts"></div>
+
+<script src="vendor/leaflet/leaflet.js"></script>
+<script src="app.js"></script>
+</body>
+</html>

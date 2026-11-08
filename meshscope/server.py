@@ -13,7 +13,7 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
 from . import __version__
-from .demo import DemoRadio
+from .demo import DemoRadio, demo_node_names
 from .radio import Radio, list_ports
 from .state import MeshState
 
@@ -21,29 +21,76 @@ log = logging.getLogger(__name__)
 
 
 class App:
+    """Holds the persistent (real) mesh state and, while demo mode runs, a throwaway demo state.
+
+    ``self.state`` is whatever the UI should currently see. Demo mode swaps in an
+    in-memory MeshState (no db_path) so simulated nodes never reach the real
+    database; leaving demo mode discards it and swaps the real state back.
+    """
+
     def __init__(self, state: MeshState, static: Path):
+        self.real_state = state
         self.state = state
         self.static = static
         self.radio: Radio = Radio(state)
         self.token = secrets.token_urlsafe(16)
         self.last_poll = 0.0
         self.quit_event = threading.Event()
+        self._swap_lock = threading.RLock()
+        self._purge_legacy_demo_nodes()
+
+    @property
+    def in_demo(self) -> bool:
+        return self.state is not self.real_state
+
+    def _purge_legacy_demo_nodes(self):
+        """Remove demo nodes that older versions wrote into the real database."""
+        demo = demo_node_names()
+        st = self.real_state
+        stale = [num for num, n in st.nodes.items() if num in demo and n.get("longName") in (None, demo[num])]
+        if stale:
+            st.forget_nodes(stale)
+            st.save(force=True)
+            log.info("Removed %d leftover demo nodes from the database", len(stale))
+
+    def _enter_demo(self):
+        with self._swap_lock:
+            if self.in_demo:
+                return
+            self.radio.disconnect()
+            demo_state = MeshState(None)
+            demo_state.version = self.real_state.version + 1  # make the UI notice the swap
+            self.state = demo_state
+            self.radio = DemoRadio(demo_state)
+
+    def _exit_demo(self):
+        with self._swap_lock:
+            if not self.in_demo:
+                return
+            self.radio.disconnect()
+            demo_state = self.state
+            self.state = self.real_state
+            self.radio = Radio(self.real_state)
+            self.real_state.version = max(self.real_state.version, demo_state.version) + 1
+            self.real_state.add_log("conn", "Demo mode ended; simulated nodes discarded")
 
     def connect(self, body):
         if body.get("demo"):
-            if not isinstance(self.radio, DemoRadio):
-                self.radio.disconnect()
-                self.radio = DemoRadio(self.state)
+            self._enter_demo()
             self.radio.connect("DEMO")
             return {"ok": True}
         port = body.get("port")
         if not port:
             raise ValueError("No COM port selected")
-        if isinstance(self.radio, DemoRadio):
-            self.radio.disconnect()
-            self.radio = Radio(self.state)
+        self._exit_demo()
         self.radio.connect(port)
         return {"ok": True}
+
+    def disconnect(self):
+        if self.in_demo:
+            self._exit_demo()
+        else:
+            self.radio.disconnect()
 
 
 def make_handler(app: App):
@@ -121,7 +168,7 @@ def make_handler(app: App):
             if path == "/api/connect":
                 return self._json(app.connect(body))
             if path == "/api/disconnect":
-                app.radio.disconnect()
+                app.disconnect()
                 return self._json({"ok": True})
             if path == "/api/action":
                 job = app.radio.run_action(body["kind"], int(body["node"]), body.get("hopLimit"))

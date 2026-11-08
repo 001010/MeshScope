@@ -145,10 +145,16 @@ class MeshState:
         )
 
     def forget_node(self, num: int):
+        self.forget_nodes([num])
+
+    def forget_nodes(self, nums):
+        nums = set(nums)
         with self._lock:
-            self.nodes.pop(num, None)
-            for k in [k for k, l in self.links.items() if num in (l["tx"], l["rx"])]:
+            for num in nums:
+                self.nodes.pop(num, None)
+            for k in [k for k, l in self.links.items() if l["tx"] in nums or l["rx"] in nums]:
                 del self.links[k]
+            self.jobs = [j for j in self.jobs if j.get("target") not in nums]
             self._touch()
 
     def clear_history(self):

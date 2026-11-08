@@ -83,13 +83,42 @@ def main():
     rf = call(f"/api/reach?node={targets[0]}&hops=7&maxAgeH=24")
     print(f"reach from far node @7 hops: {rf['reachable']} nodes")
 
-    # persistence round trip
+    # demo data must never reach the real (persistent) state
+    demo_nums = {n["num"] for n in call("/api/state")["nodes"]}
+    assert not state.nodes and not state.links, "demo leaked into the real state while running"
+    v_demo = call("/api/state")["version"]
     call("/api/disconnect", {})
+    after = call("/api/state")
+    assert after["version"] > v_demo, "UI would not notice the swap back"
+    assert not {n["num"] for n in after["nodes"]} & demo_nums, "demo nodes visible after leaving demo"
+    assert after["status"] == "disconnected"
+    print("demo isolation ok: real state untouched,", len(demo_nums), "demo nodes discarded")
+
+    # real data survives a demo session, and persists
+    state.merge_node(0x12345678, longName="Real Node", lat=33.4, lon=-112.0, lastHeard=time.time())
+    call("/api/connect", {"demo": True})
+    time.sleep(1.5)
+    call("/api/disconnect", {})
+    assert {n["num"] for n in call("/api/state")["nodes"]} == {0x12345678}
     state.save(force=True)
     s2 = MeshState(tmp / "db.json")
-    assert len(s2.nodes) == len(state.nodes) and len(s2.links) == len(state.links)
-    print("persistence ok:", len(s2.nodes), "nodes,", len(s2.links), "links")
+    assert set(s2.nodes) == {0x12345678}
+    print("persistence ok: real node kept, no demo nodes on disk")
     srv.shutdown()
+
+    # databases polluted by older versions get cleaned on startup
+    from meshscope.demo import demo_node_names
+    legacy = MeshState(tmp / "legacy.json")
+    names = demo_node_names()
+    for num, name in names.items():
+        legacy.merge_node(num, longName=name)
+    legacy.merge_node(0x12345678, longName="Real Node")
+    legacy.add_link(next(iter(names)), 0x12345678, 5.0, "direct")
+    legacy.save(force=True)
+    App(MeshState(tmp / "legacy.json"), static_dir())
+    cleaned = MeshState(tmp / "legacy.json")
+    assert set(cleaned.nodes) == {0x12345678} and not cleaned.links, cleaned.nodes.keys()
+    print(f"legacy purge ok: removed {len(names)} old demo nodes, kept the real one")
     print("SMOKE TEST PASSED")
 
 

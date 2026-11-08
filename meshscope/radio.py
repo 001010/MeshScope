@@ -58,6 +58,7 @@ class Radio:
         self._send_lock = threading.Lock()
         self._connect_lock = threading.Lock()
         self._subscribed = False
+        self._connecting = False
 
     # ------------------------------------------------------------ lifecycle
     def _subscribe(self):
@@ -86,8 +87,10 @@ class Radio:
             import meshtastic.serial_interface
 
             self._subscribe()
+            self._connecting = True
             iface = meshtastic.serial_interface.SerialInterface(devPath=port, timeout=60)
             self.iface = iface
+            self._connecting = False
             self._import_device_state()
             self.state.set_status("connected", "", port=port)
             self.state.add_log("conn", f"Connected to {self.state.name_of(self.state.local_num)} on {port}")
@@ -100,6 +103,7 @@ class Radio:
             self.state.set_status("error", msg, port=port)
             self.state.add_log("error", f"Connect to {port} failed: {msg}")
         finally:
+            self._connecting = False
             self._connect_lock.release()
 
     def _import_device_state(self):
@@ -141,13 +145,23 @@ class Radio:
             self.state.set_status("error", "Connection to the radio was lost (cable unplugged?)")
             self.state.add_log("error", "Connection lost")
 
+    def _owns(self, interface) -> bool:
+        if interface is None or interface is self.iface:
+            return True
+        # while connecting, the library publishes before SerialInterface() returns
+        return self.iface is None and self._connecting
+
     def _on_node_updated(self, node, interface=None):
+        if not self._owns(interface):
+            return
         try:
             self.state.merge_lib_node(node)
         except Exception:
             log.exception("node.updated handling failed")
 
     def _on_receive(self, packet, interface=None):
+        if not self._owns(interface):
+            return  # a packet from a connection this Radio doesn't own
         try:
             self.handle_packet(packet)
         except Exception:

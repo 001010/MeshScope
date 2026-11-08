@@ -24,6 +24,13 @@ NAMES = ["Ridge", "Creek", "Summit", "Mesa", "Harbor", "Pine", "Aspen", "Falcon"
          "Cobalt", "Quartz", "Larkspur", "Ember", "Cottonwood", "Kestrel", "Badger", "Foothill"]
 
 
+def demo_node_names(seed: int = 7, count: int = 26) -> dict:
+    """{node number: long name} for every node the demo generates (it is deterministic)."""
+    d = DemoRadio(None, seed=seed, count=count)
+    d._build()
+    return {num: n["name"] for num, n in d.info.items()}
+
+
 class DemoRadio(Radio):
     def __init__(self, state, seed: int = 7, count: int = 26):
         super().__init__(state)
@@ -117,7 +124,7 @@ class DemoRadio(Radio):
         threading.Thread(target=self._sim_loop, daemon=True, name="demo").start()
 
     def disconnect(self):
-        if self.state.status != "disconnected":
+        if self.state is not None and self.state.status != "disconnected":
             self._stop.set()
             self.state.add_log("conn", "Demo stopped")
             self.state.set_status("disconnected")

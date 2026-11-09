@@ -357,10 +357,10 @@ legend { color: var(--text); font-weight: 600; padding: 0 6px; }
 .cfg-body h2 .muted { text-transform: none; font-weight: 400; }
 .cfg-node { margin-bottom: 4px; }
 .cfg-fields { display: grid; grid-template-columns: repeat(auto-fill, minmax(330px, 1fr)); gap: 6px 18px; max-width: 1200px; }
-.cfg-field { display: grid; grid-template-columns: 1fr 170px; align-items: center; gap: 10px; padding: 5px 8px; border-radius: 6px; border: 1px solid transparent; color: var(--text); }
-.cfg-field .lab { display: flex; flex-direction: column; text-transform: capitalize; }
+.cfg-field { display: grid; grid-template-columns: minmax(0, 1fr) minmax(120px, 42%); align-items: center; gap: 10px; padding: 5px 8px; border-radius: 6px; border: 1px solid transparent; color: var(--text); }
+.cfg-field .lab { display: flex; flex-direction: column; text-transform: capitalize; min-width: 0; overflow-wrap: anywhere; }
 .cfg-field .lab code { background: none; padding: 0; color: var(--muted); font-size: 10.5px; text-transform: none; }
-.cfg-field input:not([type=checkbox]), .cfg-field select { width: 100%; }
+.cfg-field input:not([type=checkbox]), .cfg-field select { width: 100%; min-width: 0; box-sizing: border-box; }
 .cfg-field input[type=checkbox] { justify-self: start; width: 16px; height: 16px; }
 .cfg-field .ro { color: var(--muted); font-size: 12px; word-break: break-all; }
 .cfg-field.changed, td.changed { background: rgba(251, 191, 36, .08); border-color: #78350f; }

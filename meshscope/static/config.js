@@ -72,6 +72,9 @@ function renderConfigNav() {
   $("#cfgNav").innerHTML = html;
 }
 
+// esc() plus <wbr> after "." and "_" so long setting names wrap at word boundaries
+const breakable = t => esc(t).replace(/([._])/g, "$1<wbr>");
+
 function fieldInput(sec, f) {
   const cur = sec in CF.ch.sections && f.path in CF.ch.sections[sec] ? CF.ch.sections[sec][f.path] : f.value;
   const changed = sec in CF.ch.sections && f.path in CF.ch.sections[sec];
@@ -82,7 +85,7 @@ function fieldInput(sec, f) {
   else if (f.kind === "enum") input = `<select ${attrs}>${f.options.map(o => `<option ${o === cur ? "selected" : ""}>${esc(o)}</option>`).join("")}</select>`;
   else if (f.kind === "int" || f.kind === "float") input = `<input type="number" ${attrs} value="${esc(cur)}" step="${f.kind === "float" ? "any" : "1"}">`;
   else input = `<input ${attrs} value="${esc(cur)}">`;
-  return `<label class="cfg-field${changed ? " changed" : ""}"><span class="lab">${esc(humanize(f.path))}<code>${esc(sec)}.${esc(f.path)}</code></span>${input}</label>`;
+  return `<label class="cfg-field${changed ? " changed" : ""}"><span class="lab">${esc(humanize(f.path))}<code>${breakable(sec + "." + f.path)}</code></span>${input}</label>`;
 }
 
 const SECTION_NOTES = {

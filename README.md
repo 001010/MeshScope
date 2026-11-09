@@ -13,7 +13,7 @@ A Windows desktop app for exploring a Meshtastic mesh through a radio connected 
 - **Terrain heatmap** (in Reach): predicted signal margin around one or more nodes, using real elevation data (hills and valleys shadow the signal), per-node antenna height (towers, rooftops) and an environment loss for buildings and trees.
 - **Activity**: request results, including full traceroute paths with SNR for each hop in both directions, and a live packet log.
 - **Console**: run `meshtastic` CLI commands (`--info`, `--get`, `--set`, ...) on the connected radio, with the device's debug log alongside. Commands that reboot or wipe the radio ask first.
-- **Addons**: Python scripts that receive every inbound packet and can log, alert, store data or act (send messages, run traceroutes). Create from templates, edit in the app, enable/disable, and import or export them singly or as a `.zip`.
+- **Addons**: Python scripts that receive every inbound packet and can log, alert, store data or act (send messages, run traceroutes). Create from templates, edit in the app, enable/disable, and import or export them singly or as a `.zip`. See the **[addon guide](docs/ADDONS.md)** to write your own.
 - **MQTT**: subscribe to a Meshtastic MQTT broker for wider, real-time data. Optional uplink publishes only broadcasts your radio heard over the air that the sender marked OK-to-MQTT and that no other gateway has already published; nothing received from MQTT is ever published back.
 - **Demo mode**: a simulated mesh for trying the app without a radio.
 

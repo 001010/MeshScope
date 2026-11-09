@@ -13,11 +13,12 @@ from meshscope import APP_NAME, __version__
 UPGRADE_CODE = "{045C21F7-8BB4-4D15-8CFF-A82DB9F505D6}"
 
 build_exe_options = {
-    "packages": ["meshscope", "meshtastic", "serial", "pubsub", "google.protobuf", "tabulate", "yaml"],
+    "packages": ["meshscope", "meshtastic", "serial", "pubsub", "google.protobuf", "tabulate", "yaml",
+                 "paho.mqtt", "numpy", "PIL"],
     "excludes": [
         "tkinter", "unittest", "pydoc_data", "test",
         # BLE / optional analysis extras of the meshtastic package - not used over USB
-        "bleak", "winrt", "dash", "dash_bootstrap_components", "pandas", "pyarrow", "numpy",
+        "bleak", "winrt", "dash", "dash_bootstrap_components", "pandas", "pyarrow",
         "matplotlib", "riden", "ppk2_api", "parse", "platformdirs", "print_color", "argcomplete",
     ],
     "include_files": [("meshscope/static", "static"), ("assets/meshscope.ico", "meshscope.ico")],
@@ -44,7 +45,7 @@ bdist_msi_options = {
     "data": msi_data,
     "summary_data": {
         "author": "MeshScope",
-        "comments": "Meshtastic USB node explorer: node list, traceroute, ping, maps, topology and reach analysis",
+        "comments": "Meshtastic USB node explorer: nodes, messages, config, maps, topology, reach, MQTT and addons",
     },
 }
 

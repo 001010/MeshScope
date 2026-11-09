@@ -16,7 +16,8 @@ from pathlib import Path
 
 from . import APP_NAME, __version__
 from .paths import data_dir, is_frozen, static_dir
-from .server import App, start_server
+from .core import App
+from .server import start_server
 from .state import MeshState
 
 log = logging.getLogger("meshscope")
@@ -97,6 +98,7 @@ def main(argv=None):
     state = MeshState(data_dir() / "meshscope-db.json")
     app = App(state, static_dir())
     srv = start_server(app, args.port)
+    app.start()
     url = f"http://127.0.0.1:{srv.server_address[1]}/?t={app.token}"
     log.info("UI at %s", url.split("?")[0])
 
@@ -112,10 +114,7 @@ def main(argv=None):
         pass
     finally:
         log.info("Shutting down")
-        try:
-            app.radio.disconnect()
-        except Exception:
-            log.exception("disconnect on exit")
+        app.shutdown()
         state.save(force=True)
         srv.shutdown()
 

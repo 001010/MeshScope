@@ -2,12 +2,19 @@
 
 A Windows desktop app for exploring a Meshtastic mesh through a radio connected over USB.
 
-- **Nodes**: every node seen, with hops, SNR, last heard, distance, battery, hardware and role. Search, sort and filter.
+- **Nodes**: every node seen, with hops, SNR, last heard, distance, battery, hardware and role. Search, sort and filter. Star **favorites** and keep them on top, or show only favorites.
+- **My Nodes**: radios you have connected to are remembered by node ID, not COM port. MeshScope finds them again on whatever port Windows assigns, can connect one automatically at startup, and reconnects it if it's unplugged and plugged back in.
+- **Messages**: the radio's channels, switching between them, sending messages on a channel or as a direct message, and delivery status (heard by a neighbour / delivered / failed). A message is marked **via MQTT** only if it reached MeshScope solely through the MQTT bridge.
+- **Node Config**: view and edit every setting of the connected radio (owner, channels and keys, radio config, modules). Every change saves a backup first. Back up on demand, download or import backups, and restore one to the radio. Backups use the `meshtastic --export-config` YAML format.
 - **Actions** on any node: **traceroute**, **ping**, **request node info**, plus request position and request telemetry. Any hop limit from 1 to 7.
-- **Map**: nodes with GPS positions, and the radio links between them coloured by SNR (Street, Topographic and Satellite layers).
-- **Topology**: a force-directed graph of the local mesh. It also shows nodes that have no GPS position.
+- **Map**: nodes with GPS positions, and the radio links between them coloured by SNR (Street, Topographic and Satellite layers). Hovering a node opens an info bubble; move into it to use its buttons, or click to pin it. **Live** animates packets along the path they most likely took as they're received.
+- **Topology**: a force-directed graph of the local mesh. It also shows nodes that have no GPS position, and has the same **Live** animation.
 - **Reach**: pick any node and a hop limit. MeshScope floods outward over the observed links, the same way Meshtastic rebroadcasts a packet. It shows which nodes the message reaches at each hop, the coverage footprint, the farthest node reached and the nodes just past the hop limit.
+- **Terrain heatmap** (in Reach): predicted signal margin around one or more nodes, using real elevation data (hills and valleys shadow the signal), per-node antenna height (towers, rooftops) and an environment loss for buildings and trees.
 - **Activity**: request results, including full traceroute paths with SNR for each hop in both directions, and a live packet log.
+- **Console**: run `meshtastic` CLI commands (`--info`, `--get`, `--set`, ...) on the connected radio, with the device's debug log alongside. Commands that reboot or wipe the radio ask first.
+- **Addons**: Python scripts that receive every inbound packet and can log, alert, store data or act (send messages, run traceroutes). Create from templates, edit in the app, enable/disable, and import or export them singly or as a `.zip`.
+- **MQTT**: subscribe to a Meshtastic MQTT broker for wider, real-time data. Optional uplink publishes only broadcasts your radio heard over the air that the sender marked OK-to-MQTT and that no other gateway has already published; nothing received from MQTT is ever published back.
 - **Demo mode**: a simulated mesh for trying the app without a radio.
 
 ## Install
@@ -44,6 +51,9 @@ Traceroutes are the best way to fill in the map and the reach analysis. Enabling
 `%LOCALAPPDATA%\MeshScope\` holds:
 - `meshscope-db.json`: the node and link history, which is kept between sessions. Clear it with **Forget** on a node, or delete the file.
 - `meshscope.log`: the diagnostic log.
+- `config-backups\`: radio configuration backups (they contain channel keys and the radio's private key).
+- `addons\`: your addon scripts and their saved data.
+- `terrain-cache\`: downloaded elevation tiles for the heatmap.
 
 ## Building from source
 
@@ -62,7 +72,8 @@ To run it without building:
 .venv\Scripts\python -m meshscope --no-window # prints the URL instead
 ```
 
-`tests\screenshots.py <dir>` takes a headless-Edge screenshot of every tab in demo mode.
+`tests\screenshots.py <dir>` takes a headless-Edge screenshot of every tab in demo mode and fails on any UI script error.
+`tests\live_test.py COM9` and `tests\live_config_check.py COM9` check a real radio read-only. `tests\terrain_check.py` checks the coverage model (needs internet).
 
 When you release a new version, bump `__version__` in `meshscope/__init__.py`. Keep `UPGRADE_CODE` in `setup.py` unchanged, so that a new MSI upgrades an existing install instead of installing beside it.
 
@@ -70,12 +81,20 @@ When you release a new version, bump `__version__` in `meshscope/__init__.py`. K
 
 ```
 meshscope/
-  app.py      entry point: local server + Edge app window
-  server.py   localhost JSON API (token-protected) + static files
-  radio.py    USB serial connection, packet decoding, actions
-  state.py    node/link store, topology, reach (flood) analysis, persistence
-  demo.py     simulated mesh that drives the real packet-handling code
-  static/     UI (vanilla JS + Leaflet)
+  app.py        entry point: local server + Edge app window
+  core.py       App object: owns state, radio, MQTT, addons, console, config, coverage
+  server.py     localhost JSON API (token-protected) + static files
+  radio.py      USB serial connection, actions, text messages and ACKs
+  ingest.py     packet decoding into nodes / links / messages (shared by radio, demo, MQTT)
+  state.py      node/link/message store, topology, reach (flood) analysis, persistence
+  nodeconfig.py schema-driven config editor, backups and restore
+  console.py    in-process `meshtastic` CLI on the open connection
+  addons.py     addon runtime (one thread per addon)
+  mqtt.py       MQTT bridge (subscribe, decrypt, filtered uplink)
+  meshcrypto.py channel key expansion, hashing, AES-CTR
+  terrain.py    elevation-based coverage heatmaps
+  demo.py       simulated mesh that drives the real packet-handling code
+  static/       UI (vanilla JS + Leaflet)
 setup.py      cx_Freeze / MSI configuration
 build.ps1     one-shot build
 ```

@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import base64
 import json
 import logging
 import mimetypes
@@ -9,88 +10,16 @@ import secrets
 import threading
 import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from pathlib import Path
-from urllib.parse import parse_qs, urlparse
+from urllib.parse import parse_qs, quote, urlparse
 
 from . import __version__
-from .demo import DemoRadio, demo_node_names
-from .radio import Radio, list_ports
-from .state import MeshState
+from .core import App  # noqa: F401  (re-exported for callers/tests)
+from .radio import list_ports
+from .terrain import ENVIRONMENTS, PRESETS
 
 log = logging.getLogger(__name__)
 
-
-class App:
-    """Holds the persistent (real) mesh state and, while demo mode runs, a throwaway demo state.
-
-    ``self.state`` is whatever the UI should currently see. Demo mode swaps in an
-    in-memory MeshState (no db_path) so simulated nodes never reach the real
-    database; leaving demo mode discards it and swaps the real state back.
-    """
-
-    def __init__(self, state: MeshState, static: Path):
-        self.real_state = state
-        self.state = state
-        self.static = static
-        self.radio: Radio = Radio(state)
-        self.token = secrets.token_urlsafe(16)
-        self.last_poll = 0.0
-        self.quit_event = threading.Event()
-        self._swap_lock = threading.RLock()
-        self._purge_legacy_demo_nodes()
-
-    @property
-    def in_demo(self) -> bool:
-        return self.state is not self.real_state
-
-    def _purge_legacy_demo_nodes(self):
-        """Remove demo nodes that older versions wrote into the real database."""
-        demo = demo_node_names()
-        st = self.real_state
-        stale = [num for num, n in st.nodes.items() if num in demo and n.get("longName") in (None, demo[num])]
-        if stale:
-            st.forget_nodes(stale)
-            st.save(force=True)
-            log.info("Removed %d leftover demo nodes from the database", len(stale))
-
-    def _enter_demo(self):
-        with self._swap_lock:
-            if self.in_demo:
-                return
-            self.radio.disconnect()
-            demo_state = MeshState(None)
-            demo_state.version = self.real_state.version + 1  # make the UI notice the swap
-            self.state = demo_state
-            self.radio = DemoRadio(demo_state)
-
-    def _exit_demo(self):
-        with self._swap_lock:
-            if not self.in_demo:
-                return
-            self.radio.disconnect()
-            demo_state = self.state
-            self.state = self.real_state
-            self.radio = Radio(self.real_state)
-            self.real_state.version = max(self.real_state.version, demo_state.version) + 1
-            self.real_state.add_log("conn", "Demo mode ended; simulated nodes discarded")
-
-    def connect(self, body):
-        if body.get("demo"):
-            self._enter_demo()
-            self.radio.connect("DEMO")
-            return {"ok": True}
-        port = body.get("port")
-        if not port:
-            raise ValueError("No COM port selected")
-        self._exit_demo()
-        self.radio.connect(port)
-        return {"ok": True}
-
-    def disconnect(self):
-        if self.in_demo:
-            self._exit_demo()
-        else:
-            self.radio.disconnect()
+MAX_BODY = 32 * 1024 * 1024
 
 
 def make_handler(app: App):
@@ -102,10 +31,18 @@ def make_handler(app: App):
 
         # ---- helpers
         def _json(self, obj, code=200):
-            data = json.dumps(obj, default=str).encode()
+            data = json.dumps(obj, default=_json_default).encode()
             self.send_response(code)
             self.send_header("Content-Type", "application/json")
             self.send_header("Cache-Control", "no-store")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def _bytes(self, data: bytes, ctype: str, filename: str):
+            self.send_response(200)
+            self.send_header("Content-Type", ctype)
+            self.send_header("Content-Disposition", f"attachment; filename*=UTF-8''{quote(filename)}")
             self.send_header("Content-Length", str(len(data)))
             self.end_headers()
             self.wfile.write(data)
@@ -117,6 +54,8 @@ def make_handler(app: App):
 
         def _body(self):
             n = int(self.headers.get("Content-Length") or 0)
+            if n > MAX_BODY:
+                raise ValueError("Request too large")
             return json.loads(self.rfile.read(n) or b"{}") if n else {}
 
         # ---- routes
@@ -128,6 +67,9 @@ def make_handler(app: App):
                 q = {k: v[0] for k, v in parse_qs(u.query).items()}
                 try:
                     return self._api_get(u.path, q)
+                except (RuntimeError, ValueError, KeyError, FileNotFoundError) as e:
+                    log.warning("GET %s failed: %s", u.path, e)
+                    return self._json({"error": str(e) or e.__class__.__name__}, 400)
                 except Exception as e:
                     log.exception("GET %s", u.path)
                     return self._json({"error": str(e)}, 400)
@@ -141,7 +83,7 @@ def make_handler(app: App):
                 return self._api_post(u.path, self._body())
             except Exception as e:
                 log.warning("POST %s failed: %s", u.path, e)
-                return self._json({"error": str(e)}, 400)
+                return self._json({"error": str(e) or e.__class__.__name__}, 400)
 
         def _api_get(self, path, q):
             st = app.state
@@ -152,7 +94,11 @@ def make_handler(app: App):
                     st.expire_jobs()
                     if since == st.version:
                         return self._json({"unchanged": True, "version": st.version})
-                return self._json(st.snapshot())
+                snap = st.snapshot()
+                snap["inDemo"] = app.in_demo
+                snap["mqttStatus"] = app.mqtt.status
+                snap["addonsVersion"] = app.addons.version
+                return self._json(snap)
             if path == "/api/ports":
                 return self._json({"ports": list_ports()})
             if path == "/api/reach":
@@ -160,21 +106,52 @@ def make_handler(app: App):
                 return self._json(st.reach(int(q["node"]), int(q.get("hops", st.hop_limit)),
                                            q.get("bidir", "1") == "1", max_age, q.get("mqtt") == "1"))
             if path == "/api/info":
-                return self._json({"version": __version__, "dataDir": str(st.db_path.parent) if st.db_path else None})
+                return self._json({"version": __version__, "dataDir": str(app.workdir),
+                                   "presets": PRESETS, "environments": list(ENVIRONMENTS)})
+            if path == "/api/mynodes":
+                return self._json({"myNodes": app.my_nodes(), "ports": list_ports()})
+            if path == "/api/console":
+                return self._json(app.console.since(int(q.get("since", 0))))
+            if path == "/api/addons":
+                return self._json(app.addons.list())
+            if path == "/api/addon":
+                return self._json(app.addons.detail(q["slug"], int(q.get("since", 0))))
+            if path == "/api/addons/export":
+                slugs = [s for s in q.get("slugs", "").split(",") if s]
+                name, ctype, data = app.addons.export(slugs)
+                return self._bytes(data, ctype, name)
+            if path == "/api/mqtt":
+                return self._json(app.mqtt.info())
+            if path == "/api/config":
+                return self._json(app.config.schema())
+            if path == "/api/config/backups":
+                return self._json({"backups": app.config.list_backups(), "dir": str(app.config.dir)})
+            if path == "/api/config/backup/download":
+                name = q["file"]
+                return self._bytes(app.config.read(name), "application/x-yaml", name)
             return self._json({"error": "not found"}, 404)
 
         def _api_post(self, path, body):
             st = app.state
+            # -- connection
             if path == "/api/connect":
                 return self._json(app.connect(body))
             if path == "/api/disconnect":
                 app.disconnect()
                 return self._json({"ok": True})
+            # -- node actions / data
             if path == "/api/action":
                 job = app.radio.run_action(body["kind"], int(body["node"]), body.get("hopLimit"))
                 return self._json({"ok": True, "jobId": job["id"]})
             if path == "/api/forget":
                 st.forget_node(int(body["node"]))
+                return self._json({"ok": True})
+            if path == "/api/favorite":
+                st.set_favorite(int(body["node"]), bool(body.get("favorite", True)))
+                return self._json({"ok": True})
+            if path == "/api/node-settings":
+                h = body.get("antennaHeight")
+                st.merge_node(int(body["node"]), antennaHeight=None if h in (None, "") else max(0.1, float(h)))
                 return self._json({"ok": True})
             if path == "/api/clear":
                 st.clear_history()
@@ -182,6 +159,80 @@ def make_handler(app: App):
             if path == "/api/quit":
                 app.quit_event.set()
                 return self._json({"ok": True})
+            # -- my nodes
+            if path == "/api/mynodes/update":
+                num = int(body["num"])
+                if "nickname" in body:
+                    app.real_state.upsert_my_node(num, nickname=str(body["nickname"])[:40])
+                if "autoConnect" in body:
+                    app.real_state.update_settings({"autoConnect": num if body["autoConnect"] else None})
+                app.real_state.save(force=True)
+                return self._json({"ok": True})
+            if path == "/api/mynodes/remove":
+                app.real_state.remove_my_node(int(body["num"]))
+                app.real_state.save(force=True)
+                return self._json({"ok": True})
+            # -- messages
+            if path == "/api/send":
+                to = body.get("to")
+                pkt = app.radio.send_text(body.get("text", ""), int(to) if to not in (None, "") else 0xFFFFFFFF,
+                                          int(body.get("channel") or 0))
+                return self._json({"ok": True, "packetId": pkt.id})
+            # -- node configuration
+            if path == "/api/config/apply":
+                return self._json(app.config.apply(body))
+            if path == "/api/config/backup":
+                return self._json({"ok": True, "backup": app.config.backup(str(body.get("label") or "manual")[:60])})
+            if path == "/api/config/backup/upload":
+                return self._json({"ok": True, "backup": app.config.upload(body["name"], base64.b64decode(body["data"]))})
+            if path == "/api/config/backup/delete":
+                app.config.delete(body["file"])
+                return self._json({"ok": True})
+            if path == "/api/config/restore":
+                return self._json(app.config.restore(body["file"]))
+            # -- console
+            if path == "/api/console/run":
+                return self._json(app.console.run(body.get("args", ""), bool(body.get("confirmed"))))
+            if path == "/api/console/clear":
+                app.console.clear()
+                return self._json({"ok": True})
+            # -- addons
+            if path == "/api/addons/create":
+                a = app.addons.create(body.get("name") or "New addon", body.get("template", "blank"))
+                return self._json({"ok": True, "slug": a.slug})
+            if path == "/api/addons/save":
+                a = app.addons.save(body["slug"], body["code"])
+                return self._json({"ok": True, "slug": a.slug, "status": a.status, "error": a.error})
+            if path == "/api/addons/enable":
+                app.addons.set_enabled(body["slug"], bool(body.get("enabled")))
+                return self._json({"ok": True})
+            if path == "/api/addons/delete":
+                app.addons.delete(body["slug"])
+                return self._json({"ok": True})
+            if path == "/api/addons/import":
+                files = [{"name": f["name"], "data": base64.b64decode(f["data"])} for f in body.get("files", [])]
+                return self._json({"ok": True, "created": app.addons.import_files(files)})
+            # -- mqtt
+            if path == "/api/mqtt/settings":
+                patch = {k: v for k, v in body.items() if k in app.real_state.settings["mqtt"]}
+                if patch.get("password") == "********":
+                    patch.pop("password")
+                app.real_state.update_settings({"mqtt": patch})
+                app.real_state.save(force=True)
+                if app.mqtt.client is not None and any(k in patch for k in ("host", "port", "tls", "username", "password", "topics")):
+                    app.mqtt.start()  # reconnect with the new settings
+                return self._json({"ok": True})
+            if path == "/api/mqtt/start":
+                app.real_state.update_settings({"mqtt": {"enabled": True}})
+                app.mqtt.start()
+                return self._json({"ok": True})
+            if path == "/api/mqtt/stop":
+                app.real_state.update_settings({"mqtt": {"enabled": False}})
+                app.mqtt.stop()
+                return self._json({"ok": True})
+            # -- coverage
+            if path == "/api/coverage":
+                return self._json(app.coverage(body))
             return self._json({"error": "not found"}, 404)
 
         def _static(self, path):
@@ -203,6 +254,14 @@ def make_handler(app: App):
             self.wfile.write(data)
 
     return Handler
+
+
+def _json_default(o):
+    if isinstance(o, (bytes, bytearray)):
+        return base64.b64encode(bytes(o)).decode()
+    if isinstance(o, set):
+        return sorted(o)
+    return str(o)
 
 
 def start_server(app: App, port: int = 0) -> ThreadingHTTPServer:

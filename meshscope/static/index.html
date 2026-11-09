@@ -7,20 +7,35 @@
 <link rel="icon" href="icon.png">
 <link rel="stylesheet" href="vendor/leaflet/leaflet.css">
 <link rel="stylesheet" href="app.css">
+<script>/* collect uncaught UI errors (shown in #jsErrors, useful when reporting bugs) */
+window.__errs = [];
+addEventListener("error", e => {
+  __errs.push(`${(e.filename || "").split("/").pop()}:${e.lineno} ${e.message}`);
+  const d = document.getElementById("jsErrors");
+  if (d) { d.textContent = __errs.join("
+"); d.hidden = false; }
+});
+</script>
 </head>
 <body>
 <header class="topbar">
   <div class="brand"><img src="icon.png" alt=""><span>MeshScope</span></div>
   <nav class="tabs" id="tabs">
     <button data-tab="nodes" class="active">Nodes</button>
+    <button data-tab="mynodes">My Nodes</button>
+    <button data-tab="messages">Messages <span class="badge" id="msgBadge" hidden></span></button>
     <button data-tab="map">Map</button>
     <button data-tab="topology">Topology</button>
     <button data-tab="reach">Reach</button>
     <button data-tab="activity">Activity <span class="badge" id="pendingBadge" hidden></span></button>
+    <button data-tab="config">Node Config</button>
+    <button data-tab="console">Console</button>
+    <button data-tab="addons">Addons</button>
+    <button data-tab="mqtt">MQTT <span class="dot" id="mqttDot" hidden></span></button>
   </nav>
   <div class="conn">
     <span class="pill" id="statusPill">Disconnected</span>
-    <select id="portSelect" title="USB serial port"></select>
+    <select id="portSelect" title="My Nodes are found on whatever COM port they are plugged into"></select>
     <button id="refreshPorts" class="icon-btn" title="Rescan USB ports">&#x21bb;</button>
     <button id="connectBtn" class="primary">Connect</button>
     <button id="demoBtn" title="Explore the app with a simulated mesh">Demo</button>
@@ -44,13 +59,16 @@
           <option value="604800">7 days</option>
         </select>
       </label>
-      <label class="chk"><input type="checkbox" id="hideMqtt"> Hide MQTT</label>
+      <label class="chk"><input type="checkbox" id="favFirst" checked> Favorites on top</label>
+      <label class="chk"><input type="checkbox" id="favOnly"> Favorites only</label>
+      <label class="chk"><input type="checkbox" id="hideMqtt"> Hide MQTT-only</label>
       <span class="spacer"></span>
       <span class="muted" id="nodeCount"></span>
     </div>
     <div class="table-wrap">
       <table class="nodes" id="nodeTable">
         <thead><tr>
+          <th data-sort="favorite" class="fav" title="Favorite">&#9733;</th>
           <th data-sort="name">Node</th>
           <th data-sort="id">ID</th>
           <th data-sort="hopsAway" class="num">Hops</th>
@@ -66,8 +84,41 @@
       </table>
       <div class="empty" id="nodesEmpty" hidden>
         <h2>No nodes yet</h2>
-        <p>Plug your Meshtastic radio in over USB, pick its COM port above and press <b>Connect</b>.<br>
+        <p>Plug your Meshtastic radio in over USB, pick it above and press <b>Connect</b>.<br>
           Or press <b>Demo</b> to explore with a simulated mesh.</p>
+      </div>
+    </div>
+  </section>
+
+  <!-- MY NODES -->
+  <section class="view" id="view-mynodes">
+    <div class="pad">
+      <h2>My Nodes</h2>
+      <p class="muted narrow">Radios you have connected to over USB are remembered by their <b>node ID</b>, not their COM port.
+        Windows can assign a different COM number when you use another USB socket or hub, so MeshScope finds the radio by its
+        USB serial number, then its last port, then by checking the node ID of each Meshtastic-looking port.
+        If a connected My Node is unplugged, MeshScope reconnects it automatically when it is plugged back in, on whatever port it appears.</p>
+      <div id="myNodesList" class="cards"></div>
+    </div>
+  </section>
+
+  <!-- MESSAGES -->
+  <section class="view" id="view-messages">
+    <div class="msgs">
+      <aside class="msg-list">
+        <h3>Channels</h3>
+        <div id="msgChannels"></div>
+        <h3>Direct messages</h3>
+        <div id="msgDms"></div>
+        <select id="msgNewDm"></select>
+      </aside>
+      <div class="msg-main">
+        <div class="msg-head" id="msgHead"></div>
+        <div class="msg-thread" id="msgThread"></div>
+        <form class="msg-compose" id="msgForm" autocomplete="off">
+          <textarea id="msgText" rows="2" maxlength="400"></textarea>
+          <div class="msg-side"><span id="msgBytes" class="muted small">0/200</span><button class="primary" id="msgSend" type="submit">Send</button></div>
+        </form>
       </div>
     </div>
   </section>
@@ -75,6 +126,8 @@
   <!-- MAP -->
   <section class="view" id="view-map">
     <div class="map-tools">
+      <label class="chk live"><input type="checkbox" id="mapLive"> <b>Live</b></label>
+      <label class="chk"><input type="checkbox" id="liveMqtt"> incl. MQTT</label>
       <label class="chk"><input type="checkbox" id="mapLinks" checked> Links</label>
       <label class="chk"><input type="checkbox" id="mapLabels" checked> Labels</label>
       <label>Link age
@@ -91,13 +144,18 @@
         <b>SNR</b><s style="--c:#22c55e"></s>&ge;5<s style="--c:#a3e635"></s>0<s style="--c:#eab308"></s>-7<s style="--c:#f97316"></s>-13<s style="--c:#ef4444"></s>worse<s style="--c:#64748b"></s>?
       </div>
     </div>
-    <div id="map" class="map"></div>
-    <div class="map-note" id="mapNote" hidden></div>
+    <div class="mapwrap">
+      <div id="map" class="map"></div>
+      <div class="legend floating flow-legend" id="mapFlowLegend" hidden></div>
+      <div class="map-note" id="mapNote" hidden></div>
+    </div>
   </section>
 
   <!-- TOPOLOGY -->
   <section class="view" id="view-topology">
     <div class="map-tools">
+      <label class="chk live"><input type="checkbox" id="topoLive"> <b>Live</b></label>
+      <label class="chk"><input type="checkbox" id="topoLiveMqtt"> incl. MQTT</label>
       <label>Link age
         <select id="topoLinkAge">
           <option value="3600">1 h</option>
@@ -110,7 +168,10 @@
       <button id="topoRelayout">Re-layout</button>
       <span class="muted">Scroll to zoom, drag the background to pan, drag nodes to arrange. Includes nodes without GPS.</span>
     </div>
-    <svg id="graph" class="graph"></svg>
+    <div class="mapwrap">
+      <svg id="graph" class="graph"></svg>
+      <div class="legend floating flow-legend" id="topoFlowLegend" hidden></div>
+    </div>
   </section>
 
   <!-- REACH -->
@@ -140,10 +201,52 @@
           <input type="range" id="reachRadius" min="0" max="15" step="0.5" value="2">
         </label>
         <div id="reachStats" class="reach-stats"></div>
+
+        <details class="heat" id="heatPanel">
+          <summary><b>Terrain coverage heatmap</b></summary>
+          <p class="muted small">Predicts signal strength from real elevation data (hills, ridges and valleys block or shadow the signal),
+            plus antenna height. Set a node's antenna height (rooftop, tower) in its details panel. Buildings and trees aren't in the elevation data,
+            so they're approximated by the <i>environment</i> loss. It's an estimate: compare it with the links you've observed.</p>
+          <label class="field">Transmitters
+            <select id="heatScope">
+              <option value="origin">Origin node only</option>
+              <option value="reached">Every node the flood reaches</option>
+              <option value="favorites">Favorite nodes</option>
+            </select>
+          </label>
+          <label class="field">Modem preset <select id="heatPreset"></select></label>
+          <div class="row2">
+            <label class="field">TX power (dBm)<input type="number" id="heatPower" value="22" min="0" max="33"></label>
+            <label class="field">Antenna gain (dBi)<input type="number" id="heatGain" value="2" min="-5" max="15" step="0.5"></label>
+          </div>
+          <div class="row2">
+            <label class="field">Environment
+              <select id="heatEnv">
+                <option value="open">Open / desert</option>
+                <option value="rural">Rural</option>
+                <option value="suburban" selected>Suburban</option>
+                <option value="urban">Urban</option>
+                <option value="dense_urban">Dense urban</option>
+              </select>
+            </label>
+            <label class="field">Receiver height (m)<input type="number" id="heatRxH" value="1.5" min="0.5" max="100" step="0.5"></label>
+          </div>
+          <label class="field">Radius: <b id="heatRadiusVal">15</b> km
+            <input type="range" id="heatRadius" min="2" max="60" value="15">
+          </label>
+          <div class="row2">
+            <button class="primary" id="heatRun">Compute heatmap</button>
+            <button id="heatClear">Clear</button>
+          </div>
+          <div id="heatInfo" class="small muted"></div>
+        </details>
       </aside>
       <div class="reach-mapwrap">
         <div id="reachMap" class="map"></div>
         <div class="legend floating" id="reachLegend"></div>
+        <div class="legend floating heat-legend" id="heatLegend" hidden>
+          <b>Link margin</b><span class="grad"></span><div class="gradlab"><span>fringe</span><span>0 dB</span><span>+15</span><span>+30</span></div>
+        </div>
       </div>
     </div>
   </section>
@@ -156,9 +259,150 @@
         <div id="jobs" class="jobs"></div>
       </div>
       <div class="col">
-        <h3>Packets <label class="chk small"><input type="checkbox" id="logRxOnly"> received only</label></h3>
+        <h3>Packets
+          <label class="chk small"><input type="checkbox" id="logRxOnly"> received only</label>
+          <label class="chk small"><input type="checkbox" id="logTextOnly"> messages only</label>
+          <label class="chk small"><input type="checkbox" id="logHideMqtt"> hide MQTT</label>
+        </h3>
         <div id="log" class="log"></div>
       </div>
+    </div>
+  </section>
+
+  <!-- NODE CONFIG -->
+  <section class="view" id="view-config">
+    <div class="cfg">
+      <aside class="cfg-nav" id="cfgNav"></aside>
+      <div class="cfg-main">
+        <div class="cfg-body pad" id="cfgBody"></div>
+        <div class="cfg-bar" id="cfgBar" hidden></div>
+      </div>
+    </div>
+  </section>
+
+  <!-- CONSOLE -->
+  <section class="view" id="view-console">
+    <div class="map-tools">
+      <span class="muted">Runs <code>meshtastic</code> CLI commands on the connected radio.</span>
+      <button data-cli="--info">--info</button>
+      <button data-cli="--nodes">--nodes</button>
+      <button data-cli="--get lora">--get lora</button>
+      <button data-cli="--get device">--get device</button>
+      <button data-cli="--ch-index 0 --info">channels</button>
+      <button data-cli="--export-config">--export-config</button>
+      <button data-cli="--help">--help</button>
+      <span class="spacer"></span>
+      <label class="chk"><input type="checkbox" id="cliDevice" checked> Device log</label>
+      <button id="cliClear">Clear</button>
+    </div>
+    <div class="console" id="cliOut"></div>
+    <div class="confirm-bar" id="cliConfirm" hidden></div>
+    <form class="cli-input" id="cliForm" autocomplete="off">
+      <span class="prompt">meshtastic&gt;</span>
+      <input id="cliInput" spellcheck="false" placeholder="e.g. --get lora.hop_limit   ·   --set lora.hop_limit 4   ·   --dest !eada6d7e --request-telemetry">
+      <button class="primary" type="submit">Run</button>
+    </form>
+  </section>
+
+  <!-- ADDONS -->
+  <section class="view" id="view-addons">
+    <div class="addons">
+      <aside class="addon-list">
+        <div class="addon-tools">
+          <button class="primary" id="addonNew">New</button>
+          <button id="addonImport" title="Import .py files or a .zip of addons">Import</button>
+          <button id="addonExportSel" title="Export the checked addons as a .zip">Export</button>
+          <input type="file" id="addonFile" accept=".py,.zip" multiple hidden>
+        </div>
+        <div class="addon-new" id="addonNewForm" hidden>
+          <input id="addonNewName" placeholder="Addon name">
+          <select id="addonNewTpl"></select>
+          <div class="row2"><button class="primary" id="addonCreate">Create</button><button id="addonCancel">Cancel</button></div>
+        </div>
+        <label class="chk small selall"><input type="checkbox" id="addonSelAll"> Select all</label>
+        <div id="addonItems"></div>
+        <p class="muted small" id="addonDir"></p>
+      </aside>
+      <div class="addon-edit" id="addonEdit">
+        <div class="empty" id="addonEmpty">
+          <h2>Addons</h2>
+          <p>Addons are Python scripts that receive every inbound packet (from the radio, MQTT or the demo) and can log, alert,
+            store data or act on it. Create one from a template, or import <code>.py</code> files or a <code>.zip</code> pack.</p>
+          <p class="warn small">Addons run as normal Python on this PC with your permissions. Only enable code you trust.
+            Imported addons start disabled.</p>
+          <details class="api-doc"><summary>Addon API reference</summary><pre id="addonDoc"></pre></details>
+        </div>
+        <div id="addonEditor" hidden>
+          <div class="addon-head">
+            <h3 id="addonTitle"></h3>
+            <span class="pill" id="addonStatus"></span>
+            <label class="chk"><input type="checkbox" id="addonEnabled"> Enabled</label>
+            <span class="spacer"></span>
+            <span class="muted small" id="addonDirty"></span>
+            <button class="primary" id="addonSave" title="Ctrl+S">Save</button>
+            <button id="addonExportOne">Export</button>
+            <button class="danger" id="addonDelete">Delete</button>
+          </div>
+          <textarea id="addonCode" spellcheck="false" wrap="off"></textarea>
+          <div class="addon-out-head"><b>Output</b><span class="muted small" id="addonCounts"></span></div>
+          <div class="console small-console" id="addonOut"></div>
+        </div>
+      </div>
+    </div>
+  </section>
+
+  <!-- MQTT -->
+  <section class="view" id="view-mqtt">
+    <div class="pad mqtt">
+      <div class="mqtt-head">
+        <h2>MQTT</h2>
+        <span class="pill" id="mqttStatus">stopped</span>
+        <span class="muted" id="mqttDetail"></span>
+        <span class="spacer"></span>
+        <button class="primary" id="mqttStart">Start</button>
+        <button id="mqttStop">Stop</button>
+      </div>
+      <div class="stat-grid wide" id="mqttStats"></div>
+      <div class="mqtt-grid">
+        <fieldset>
+          <legend>Broker</legend>
+          <div class="row2">
+            <label class="field">Host<input id="mqHost"></label>
+            <label class="field">Port<input id="mqPort" type="number"></label>
+          </div>
+          <div class="row2">
+            <label class="field">Username<input id="mqUser" autocomplete="off"></label>
+            <label class="field">Password<input id="mqPass" type="password" autocomplete="new-password"></label>
+          </div>
+          <label class="chk"><input type="checkbox" id="mqTls"> Use TLS (usually port 8883)</label>
+          <label class="field">Topics to subscribe (one per line)
+            <textarea id="mqTopics" rows="3" spellcheck="false"></textarea></label>
+          <p class="muted small">Example: <code>msh/US/#</code> for all US traffic, or a narrower regional topic. Packets on the
+            public channels are decrypted with the default key; your radio's channel keys are used automatically while it is connected.</p>
+        </fieldset>
+        <fieldset>
+          <legend>Filtering & keys</legend>
+          <label class="field">Only keep nodes within (km of your radio, 0 = no limit)<input id="mqDist" type="number" min="0"></label>
+          <label class="chk"><input type="checkbox" id="mqStrict"> Also drop nodes whose position is unknown</label>
+          <label class="field"><span>Extra channel keys (<code>ChannelName=base64key</code>, one per line)</span>
+            <textarea id="mqKeys" rows="3" spellcheck="false" placeholder="azmsh=AQ=="></textarea></label>
+        </fieldset>
+        <fieldset>
+          <legend>Uplink (publish what your radio hears) - optional</legend>
+          <label class="chk"><input type="checkbox" id="mqUplink"> Enable uplink</label>
+          <p class="muted small">MeshScope only publishes a packet when <b>all</b> of these are true:
+            your USB radio heard it over the air (never MQTT, demo, or packets your radio flags as from MQTT);
+            the sender marked it <b>OK to MQTT</b>; it's a broadcast (never DMs); it's on a channel you tick below;
+            and no other gateway has published it to the broker within the wait time. Data received from MQTT is never published back.</p>
+          <div class="row2">
+            <label class="field">Topic root<input id="mqRoot" placeholder="msh/US"></label>
+            <label class="field">Wait before publishing (s)<input id="mqDelay" type="number" min="1" max="60"></label>
+          </div>
+          <div class="field">Channels allowed to uplink
+            <div id="mqChannels" class="chips"></div></div>
+        </fieldset>
+      </div>
+      <div class="row-end"><button class="primary" id="mqttSave">Save settings</button></div>
     </div>
   </section>
 </main>
@@ -170,8 +414,17 @@
 </aside>
 
 <div class="toasts" id="toasts"></div>
+<pre id="jsErrors" class="js-errors" hidden title="UI errors"></pre>
 
 <script src="vendor/leaflet/leaflet.js"></script>
 <script src="app.js"></script>
+<script src="live.js"></script>
+<script src="mynodes.js"></script>
+<script src="messages.js"></script>
+<script src="config.js"></script>
+<script src="console.js"></script>
+<script src="addons.js"></script>
+<script src="mqtt.js"></script>
+<script>boot();</script>
 </body>
 </html>

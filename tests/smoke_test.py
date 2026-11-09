@@ -83,6 +83,57 @@ def main():
     rf = call(f"/api/reach?node={targets[0]}&hops=7&maxAgeH=24")
     print(f"reach from far node @7 hops: {rf['reachable']} nodes")
 
+    # ---- v1.1: channels + messaging (demo radio simulates the ACKs)
+    snap = call("/api/state")
+    assert [c["name"] for c in snap["channels"]] == ["LongFast", "Trailhead"], snap["channels"]
+    assert all("key" not in c for c in snap["channels"]), "channel keys leaked to the UI"
+    call("/api/send", {"text": "hello channel 1", "channel": 1})
+    dm_target = next(n["num"] for n in others if n.get("hopsAway") == 0)
+    call("/api/send", {"text": "hello direct", "to": dm_target})
+    for bad in ({"text": "x" * 201, "channel": 0}, {"text": "hi", "channel": 5}, {"text": "  ", "channel": 0}):
+        try:
+            call("/api/send", bad)
+            raise AssertionError(f"bad send accepted: {bad}")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+    deadline = time.time() + 15
+    while time.time() < deadline:
+        outs = [m for m in call("/api/state")["messages"] if m.get("outgoing")]
+        if outs and all(m["status"] != "sending" for m in outs):
+            break
+        time.sleep(0.5)
+    outs = {m["text"]: m for m in call("/api/state")["messages"] if m.get("outgoing")}
+    assert outs["hello channel 1"]["channel"] == 1 and outs["hello channel 1"]["status"] == "heard", outs["hello channel 1"]
+    assert outs["hello direct"]["dm"] and outs["hello direct"]["status"] == "delivered", outs["hello direct"]
+    print("messaging ok: channel send heard, DM delivered, bad sends rejected")
+
+    # ---- v1.1: config / console / addons are guarded in demo mode
+    for path in ("/api/config",):
+        try:
+            call(path)
+            raise AssertionError(f"{path} worked in demo mode")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400
+    assert call("/api/config/backups")["backups"] == []
+    try:
+        call("/api/console/run", {"args": "--info"})
+        raise AssertionError("CLI ran in demo mode")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+    try:
+        call("/api/console/run", {"args": "--port COM3 --info"})
+        raise AssertionError("blocked CLI flag accepted")
+    except urllib.error.HTTPError as e:
+        assert e.code == 400
+    a = call("/api/addons/create", {"name": "Alert", "template": "keyword_alert"})
+    call("/api/addons/enable", {"slug": a["slug"], "enabled": True})
+    app.radio._deliver(dm_target, 0xFFFFFFFF, "TEXT_MESSAGE_APP", b"need help here", decoded_extra={"text": "need help here"})
+    time.sleep(1.5)
+    assert any(l["kind"] == "notify" and "need help" in l["text"] for l in call("/api/state")["log"]), "addon did not fire"
+    det = call(f"/api/addon?slug={a['slug']}")
+    assert det["status"] == "running" and det["packets"] >= 1, det
+    print(f"addons ok: keyword alert fired after {det['packets']} packets")
+
     # demo data must never reach the real (persistent) state
     demo_nums = {n["num"] for n in call("/api/state")["nodes"]}
     assert not state.nodes and not state.links, "demo leaked into the real state while running"
@@ -104,6 +155,29 @@ def main():
     s2 = MeshState(tmp / "db.json")
     assert set(s2.nodes) == {0x12345678}
     print("persistence ok: real node kept, no demo nodes on disk")
+
+    # ---- v1.1: MQTT badge only for messages that arrived *only* via the MQTT bridge
+    state.local_num = 0x0BEEF001
+    state.set_channels([{"index": 0, "name": "LongFast", "primary": True}])
+    sender = 0x0C0FFEE1
+    pkt = {"from": sender, "to": 0xFFFFFFFF, "id": 4242, "hopStart": 3, "hopLimit": 1, "channelId": "LongFast",
+           "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "seen on mqtt first"}}
+    assert app.ingest_mqtt(dict(pkt), gateway=0x0A0A0A0A) == "new"
+    msgs = [m for m in call("/api/state")["messages"] if m["text"] == "seen on mqtt first"]
+    assert len(msgs) == 1 and msgs[0]["src"] == "mqtt" and msgs[0]["channel"] == 0, msgs
+    assert app.ingest_mqtt(dict(pkt), gateway=0x0B0B0B0B) == "dup"
+    from meshscope.radio import Radio
+    rf = Radio(state)
+    rf_pkt = dict(pkt, rxSnr=6.5)
+    rf_pkt.pop("channelId")
+    rf.handle_packet(rf_pkt)
+    msgs = [m for m in call("/api/state")["messages"] if m["text"] == "seen on mqtt first"]
+    assert len(msgs) == 1 and msgs[0]["src"] == "radio" and msgs[0]["snr"] == 6.5, msgs
+    rf.handle_packet({"from": sender, "to": 0xFFFFFFFF, "id": 4243, "hopStart": 3, "hopLimit": 3, "viaMqtt": True,
+                      "decoded": {"portnum": "TEXT_MESSAGE_APP", "text": "rf only"}})
+    m2 = [m for m in call("/api/state")["messages"] if m["text"] == "rf only"][0]
+    assert m2["src"] == "radio", m2
+    print("mqtt badge ok: MQTT-only message flagged, cleared once heard over RF; radio packets never flagged")
     srv.shutdown()
 
     # databases polluted by older versions get cleaned on startup

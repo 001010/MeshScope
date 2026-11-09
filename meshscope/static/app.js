@@ -1,4 +1,6 @@
-/* MeshScope UI */
+/* MeshScope UI - core: polling, nodes, drawer, map, topology, reach, activity.
+   Feature modules (live.js, mynodes.js, messages.js, config.js, console.js, addons.js, mqtt.js)
+   register themselves in VIEWS / SNAP_HOOKS before boot() runs. */
 "use strict";
 
 const TOKEN = new URLSearchParams(location.search).get("t") || "";
@@ -9,8 +11,12 @@ const BCAST = 0xffffffff;
 const S = {
   snap: null, version: -1, byNum: new Map(), tab: "nodes", selected: null,
   sort: { key: "lastHeard", dir: -1 },
-  reach: null, reachKey: "", reachTimer: null,
+  reach: null, reachKey: "", reachTimer: null, info: null,
 };
+/** name -> { show(), hide(), render() } for tabs implemented in other files */
+const VIEWS = {};
+/** fn(snap) called after every new snapshot, whatever tab is open */
+const SNAP_HOOKS = [];
 
 /* ---------------------------------------------------------------- helpers */
 function esc(v) {
@@ -27,6 +33,28 @@ async function api(path, body) {
   const j = await r.json().catch(() => ({}));
   if (!r.ok) throw new Error(j.error || r.statusText);
   return j;
+}
+/** GET an attachment (with the auth header) and hand it to the browser as a download */
+async function download(path) {
+  const r = await fetch(path, { headers: { "X-MeshScope-Token": TOKEN } });
+  if (!r.ok) { const j = await r.json().catch(() => ({})); throw new Error(j.error || r.statusText); }
+  const cd = r.headers.get("Content-Disposition") || "";
+  const m = /filename\*=UTF-8''([^;]+)/.exec(cd);
+  const name = m ? decodeURIComponent(m[1]) : "download";
+  const url = URL.createObjectURL(await r.blob());
+  const a = Object.assign(document.createElement("a"), { href: url, download: name });
+  document.body.appendChild(a); a.click(); a.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 10000);
+  return name;
+}
+/** read File objects as {name, data: base64} */
+function readFiles(files) {
+  return Promise.all([...files].map(f => new Promise((ok, fail) => {
+    const rd = new FileReader();
+    rd.onload = () => ok({ name: f.name, data: String(rd.result).split(",", 2)[1] || "" });
+    rd.onerror = () => fail(rd.error);
+    rd.readAsDataURL(f);
+  })));
 }
 function toast(msg, ok = false) {
   const el = document.createElement("div");
@@ -50,12 +78,14 @@ function hav(a, b, c, d) {
   return 2 * R * Math.asin(Math.min(1, Math.sqrt(x)));
 }
 const hasPos = n => n && n.lat != null && n.lon != null;
+const hexId = num => "!" + (num >>> 0).toString(16).padStart(8, "0");
 const nodeName = num => {
-  if (num === BCAST) return "Unknown";
+  if (num === BCAST) return "everyone";
   const n = S.byNum.get(num);
-  return n ? (n.longName || n.shortName || n.id) : "!" + (num >>> 0).toString(16).padStart(8, "0");
+  return n ? (n.longName || n.shortName || n.id) : hexId(num);
 };
 const shortName = n => n.shortName || n.id.slice(-4);
+const shortOf = num => { const n = S.byNum.get(num); return n ? shortName(n) : hexId(num).slice(-4); };
 function hopColor(n) {
   if (!n) return "var(--hx)";
   if (n.isLocal) return "var(--local)";
@@ -73,6 +103,12 @@ function snrColor(snr) {
   if (snr >= -13) return "#f97316";
   return "#ef4444";
 }
+/** darken (f<0) or lighten (f>0) a #rrggbb colour */
+function shade(hex, f) {
+  const n = parseInt(hex.slice(1), 16);
+  const ch = [n >> 16, (n >> 8) & 255, n & 255].map(c => Math.round(f < 0 ? c * (1 + f) : c + (255 - c) * f));
+  return "#" + ch.map(c => c.toString(16).padStart(2, "0")).join("");
+}
 const REACH_COLORS = ["#60a5fa", "#22c55e", "#84cc16", "#eab308", "#f97316", "#ef4444", "#d946ef", "#a855f7"];
 const edgeSnr = e => {
   const v = [e.snrAB, e.snrBA].filter(x => x != null);
@@ -81,6 +117,13 @@ const edgeSnr = e => {
 const fmtSnr = v => v == null ? "–" : `${v.toFixed(1)} dB`;
 const localNode = () => S.snap && S.byNum.get(S.snap.localNum);
 const connected = () => S.snap && S.snap.status === "connected";
+const realRadio = () => connected() && S.snap.port !== "DEMO";
+function store(key, val) {
+  try {
+    if (val === undefined) return JSON.parse(localStorage.getItem("ms." + key) || "null");
+    localStorage.setItem("ms." + key, JSON.stringify(val));
+  } catch { return null; }
+}
 
 /* ---------------------------------------------------------------- polling */
 async function poll() {
@@ -93,8 +136,8 @@ async function poll() {
       renderAll();
       if (!S.booted) {
         S.booted = true;
-        const t = location.hash.slice(1);
-        if (t && $("#view-" + t)) setTab(t);
+        const [t, sub] = decodeURIComponent(location.hash.slice(1)).split("/");
+        if (t && $("#view-" + t)) { VIEWS[t]?.deep?.(sub); setTab(t); }
       }
     }
   } catch (e) {
@@ -111,23 +154,37 @@ function renderAll() {
   if (S.tab === "topology") renderGraph();
   if (S.tab === "reach") scheduleReach();
   if (S.tab === "activity") renderActivity();
+  VIEWS[S.tab]?.render?.();
   renderDrawer();
   const pending = S.snap.jobs.filter(j => j.status === "pending" || j.status === "relayed").length;
   const b = $("#pendingBadge");
   b.hidden = !pending;
   b.textContent = pending;
+  for (const f of SNAP_HOOKS) {
+    try { f(S.snap); } catch (e) { console.error(e); }
+  }
 }
 
 /* ----------------------------------------------------------- connection UI */
 async function loadPorts() {
   try {
-    const { ports } = await api("/api/ports");
+    const { ports, myNodes } = await api("/api/mynodes");
     const sel = $("#portSelect");
     const prev = sel.value;
-    sel.innerHTML = ports.length
-      ? ports.map(p => `<option value="${esc(p.device)}">${esc(p.device)} - ${esc(p.chip || p.description || "")}${p.likelyMeshtastic ? " ★" : ""}</option>`).join("")
+    let html = "";
+    if (myNodes.length) {
+      html += `<optgroup label="My Nodes">` + myNodes.map(m => {
+        const nm = m.nickname || m.longName || m.id;
+        return `<option value="my:${m.num}" ${m.presentPort ? "" : "disabled"}>★ ${esc(nm)} - ${m.presentPort ? esc(m.presentPort) : "not plugged in"}</option>`;
+      }).join("") + `</optgroup>`;
+    }
+    html += ports.length
+      ? `<optgroup label="USB serial ports">` + ports.map(p => `<option value="${esc(p.device)}">${esc(p.device)} - ${esc(p.chip || p.description || "")}${p.likelyMeshtastic ? " ●" : ""}</option>`).join("") + `</optgroup>`
       : `<option value="">No USB serial ports found</option>`;
-    if (prev && ports.some(p => p.device === prev)) sel.value = prev;
+    sel.innerHTML = html;
+    const opts = $$("option", sel).filter(o => !o.disabled);
+    if (prev && opts.some(o => o.value === prev)) sel.value = prev;
+    else if (opts.length) sel.value = (opts.find(o => o.value.startsWith("my:")) || opts[0]).value;
   } catch (e) { toast("Could not list ports: " + e.message); }
 }
 function renderHeader() {
@@ -149,6 +206,10 @@ function renderHeader() {
   det.hidden = !(s.statusDetail && s.status !== "connected");
   det.className = "status-detail" + (s.status === "connecting" ? " info" : "");
   det.textContent = s.statusDetail;
+  if (S.prevStatus !== s.status) {
+    if (S.prevStatus && !busy) loadPorts();
+    S.prevStatus = s.status;
+  }
 }
 
 /* --------------------------------------------------------------- actions */
@@ -158,6 +219,13 @@ async function act(kind, num) {
     await api("/api/action", { kind, node: num, hopLimit: S.selected === num ? hl : undefined });
     toast(`${kind} sent to ${nodeName(num)}`, true);
   } catch (e) { toast(e.message); }
+}
+async function toggleFavorite(num) {
+  const n = S.byNum.get(num);
+  if (!n) return;
+  n.favorite = !n.favorite; // optimistic
+  renderAll();
+  try { await api("/api/favorite", { node: num, favorite: n.favorite }); } catch (e) { toast(e.message); }
 }
 function actionButtons(num, compact = true) {
   const dis = connected() && num !== S.snap.localNum ? "" : "disabled";
@@ -174,28 +242,38 @@ function actionButtons(num, compact = true) {
     <button ${dis} data-act="position" data-num="${num}">Request position</button>
     <button ${dis} data-act="telemetry" data-num="${num}">Request telemetry</button>
     <button data-reach="${num}">Show reach</button>
+    <button class="wide" data-dm="${num}">Send direct message</button>
     </div>`;
 }
 document.addEventListener("click", e => {
   const a = e.target.closest("[data-act]");
-  if (a) { e.stopPropagation(); act(a.dataset.act, +a.dataset.num); return; }
+  if (a) { e.stopPropagation(); if (!a.disabled) act(a.dataset.act, +a.dataset.num); return; }
+  const f = e.target.closest("[data-fav]");
+  if (f) { e.stopPropagation(); toggleFavorite(+f.dataset.fav); return; }
   const r = e.target.closest("[data-reach]");
   if (r) { e.stopPropagation(); showReach(+r.dataset.reach); return; }
+  const dm = e.target.closest("[data-dm]");
+  if (dm) { e.stopPropagation(); VIEWS.messages?.openDm?.(+dm.dataset.dm); return; }
   const sel = e.target.closest("[data-select]");
   if (sel) { e.stopPropagation(); selectNode(+sel.dataset.select); }
 }, true);
 
 /* ---------------------------------------------------------------- tabs */
 function setTab(t) {
+  const prev = S.tab;
   S.tab = t;
   $$("#tabs button").forEach(b => b.classList.toggle("active", b.dataset.tab === t));
   $$(".view").forEach(v => v.classList.toggle("active", v.id === "view-" + t));
+  if (prev !== t) VIEWS[prev]?.hide?.();
+  history.replaceState(null, "", location.search + "#" + t);
+  VIEWS[t]?.show?.();
   if (!S.snap) return;
   if (t === "map") { ensureMap(); setTimeout(() => { M.map.invalidateSize(); renderMap(); }, 0); }
   if (t === "topology") renderGraph(true);
   if (t === "reach") { ensureReachMap(); setTimeout(() => { R.map.invalidateSize(); fillReachOrigins(); scheduleReach(0); }, 0); }
   if (t === "activity") renderActivity();
   if (t === "nodes") renderNodes();
+  VIEWS[t]?.render?.();
 }
 $$("#tabs button").forEach(b => b.addEventListener("click", () => setTab(b.dataset.tab)));
 
@@ -211,10 +289,12 @@ function visibleNodes() {
   const q = $("#nodeSearch").value.trim().toLowerCase();
   const age = +$("#nodeAge").value;
   const hideMqtt = $("#hideMqtt").checked;
+  const favOnly = $("#favOnly").checked;
   const now = Date.now() / 1000;
   return S.snap.nodes.filter(n => {
     if (n.isLocal) return true;
-    if (age && (!n.lastHeard || now - n.lastHeard > age)) return false;
+    if (favOnly && !n.favorite) return false;
+    if (age && !n.favorite && (!n.lastHeard || now - n.lastHeard > age)) return false;
     if (hideMqtt && n.viaMqtt) return false;
     if (q && ![n.longName, n.shortName, n.id, n.hwModel, n.role].some(v => v && String(v).toLowerCase().includes(q))) return false;
     return true;
@@ -227,8 +307,10 @@ function renderNodes() {
     dist: hasPos(n) && hasPos(ln) && !n.isLocal ? hav(ln.lat, ln.lon, n.lat, n.lon) : null,
   }));
   const { key, dir } = S.sort;
+  const favFirst = $("#favFirst").checked;
   rows.sort((a, b) => {
     if (a.isLocal !== b.isLocal) return a.isLocal ? -1 : 1;
+    if (favFirst && a.favorite !== b.favorite) return a.favorite ? -1 : 1;
     const x = a[key], y = b[key];
     if (x == null && y == null) return 0;
     if (x == null) return 1;
@@ -240,8 +322,9 @@ function renderNodes() {
     th.classList.toggle("asc", th.dataset.sort === key && dir === 1);
   });
   $("#nodeTable tbody").innerHTML = rows.map(n => `
-    <tr data-select="${n.num}" class="${S.selected === n.num ? "selected" : ""}">
-      <td><span class="short" style="--c:${hopColor(n)}">${esc(shortName(n))}</span>${esc(n.name)}${n.isLocal ? '<span class="tag local">this radio</span>' : ""}${n.viaMqtt ? '<span class="tag mqtt">MQTT</span>' : ""}</td>
+    <tr data-select="${n.num}" class="${S.selected === n.num ? "selected" : ""}${n.favorite ? " favrow" : ""}">
+      <td class="fav">${n.isLocal ? "" : `<button class="star${n.favorite ? " on" : ""}" data-fav="${n.num}" title="${n.favorite ? "Remove from favorites" : "Add to favorites"}">${n.favorite ? "★" : "☆"}</button>`}</td>
+      <td><span class="short" style="--c:${hopColor(n)}">${esc(shortName(n))}</span>${esc(n.name)}${n.isLocal ? '<span class="tag local">this radio</span>' : ""}${n.viaMqtt ? '<span class="tag mqtt" title="The radio heard this node through its own MQTT link">MQTT</span>' : ""}</td>
       <td class="muted">${esc(n.id)}</td>
       <td class="num">${n.isLocal ? "–" : (n.hopsAway ?? "?")}</td>
       <td class="num" style="color:${n.isLocal ? "" : snrColor(n.hopsAway === 0 ? n.snr : null)}">${n.isLocal || n.hopsAway !== 0 ? "–" : fmtSnr(n.snr)}</td>
@@ -253,14 +336,24 @@ function renderNodes() {
       <td>${n.isLocal ? "" : actionButtons(n.num)}</td>
     </tr>`).join("");
   $("#nodesEmpty").hidden = S.snap.nodes.length > 0;
-  $("#nodeCount").textContent = `${rows.length} of ${S.snap.nodes.length} nodes`;
+  const favs = S.snap.nodes.filter(n => n.favorite).length;
+  $("#nodeCount").textContent = `${rows.length} of ${S.snap.nodes.length} nodes${favs ? ` · ${favs} favorite${favs > 1 ? "s" : ""}` : ""}`;
 }
 $$("#nodeTable th[data-sort]").forEach(th => th.addEventListener("click", () => {
   const k = th.dataset.sort;
   S.sort = S.sort.key === k ? { key: k, dir: -S.sort.dir } : { key: k, dir: ["name", "id", "hwModel", "role"].includes(k) ? 1 : -1 };
   renderNodes();
 }));
-["#nodeSearch", "#nodeAge", "#hideMqtt"].forEach(s => $(s).addEventListener("input", renderNodes));
+["#nodeSearch", "#nodeAge", "#hideMqtt", "#favFirst", "#favOnly"].forEach(s => $(s).addEventListener("input", () => {
+  store("nodeFilters", { favFirst: $("#favFirst").checked, favOnly: $("#favOnly").checked, hideMqtt: $("#hideMqtt").checked, age: $("#nodeAge").value });
+  renderNodes();
+}));
+(() => {
+  const f = store("nodeFilters");
+  if (!f) return;
+  $("#favFirst").checked = f.favFirst; $("#favOnly").checked = f.favOnly; $("#hideMqtt").checked = f.hideMqtt;
+  if (f.age != null) $("#nodeAge").value = f.age;
+})();
 
 /* ---------------------------------------------------------------- drawer */
 function renderDrawer() {
@@ -268,7 +361,8 @@ function renderDrawer() {
   const n = S.byNum.get(S.selected);
   if (!n) { d.hidden = true; return; }
   d.hidden = false;
-  if (document.activeElement && document.activeElement.id === "drawerHops") return; // don't close an open dropdown
+  const ae = document.activeElement;
+  if (ae && (ae.id === "drawerHops" || ae.id === "drawerAnt")) return; // don't clobber an open control
   const ln = localNode();
   const dist = hasPos(n) && hasPos(ln) && !n.isLocal ? hav(ln.lat, ln.lon, n.lat, n.lon) : null;
   const links = S.snap.edges.filter(e => e.a === n.num || e.b === n.num)
@@ -281,6 +375,7 @@ function renderDrawer() {
     ["Hops away", n.isLocal ? "0 (this radio)" : n.hopsAway],
     ["SNR / RSSI", n.hopsAway === 0 && !n.isLocal ? `${fmtSnr(n.snr)}${n.rssi != null ? ` / ${n.rssi} dBm` : ""}` : null],
     ["Last heard", n.isLocal ? "now" : ago(n.lastHeard)],
+    ["Heard via MQTT", n.lastHeardMqtt ? ago(n.lastHeardMqtt) : null],
     ["Position", hasPos(n) ? `${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}${n.alt != null ? ` · ${n.alt} m` : ""}` : "unknown"],
     ["Distance", dist == null ? null : `${dist.toFixed(2)} km from this radio`],
     ["Battery", n.battery == null ? null : n.battery > 100 ? `external power${n.voltage ? ` (${n.voltage.toFixed(2)} V)` : ""}` : `${n.battery}%${n.voltage ? ` (${n.voltage.toFixed(2)} V)` : ""}`],
@@ -289,12 +384,15 @@ function renderDrawer() {
     ["Uptime", n.uptime == null ? null : `${(n.uptime / 3600).toFixed(1)} h`],
     ["Via MQTT", n.viaMqtt ? "yes" : null],
   ].filter(([, v]) => v != null && v !== "");
+  const defH = S.snap.settings?.defaultAntennaHeight ?? 2;
   $("#drawerBody").innerHTML = `
-    <h2><span class="short" style="--c:${hopColor(n)}">${esc(shortName(n))}</span>${esc(n.longName || n.id)}</h2>
+    <h2>${n.isLocal ? "" : `<button class="star${n.favorite ? " on" : ""}" data-fav="${n.num}" title="Favorite">${n.favorite ? "★" : "☆"}</button>`}<span class="short" style="--c:${hopColor(n)}">${esc(shortName(n))}</span>${esc(n.longName || n.id)}</h2>
     <dl class="kv">${kv.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("")}</dl>
     ${n.isLocal ? "" : `<label>Hop limit
       <select id="drawerHops">${[1, 2, 3, 4, 5, 6, 7].map(h => `<option ${h === (+prevHops || S.snap.hopLimit) ? "selected" : ""}>${h}</option>`).join("")}</select></label>`}
     ${n.isLocal ? `<div class="actions"><button class="wide" data-reach="${n.num}">Show reach</button></div>` : actionButtons(n.num, false)}
+    <label class="field ant">Antenna height above ground (m), used by the coverage heatmap
+      <input type="number" id="drawerAnt" min="0.1" max="500" step="0.5" placeholder="${defH} (default)" value="${n.antennaHeight ?? ""}"></label>
     <section><h3>Radio links (${links.length})</h3>
       ${links.length ? links.map(l => `<div class="nb" data-select="${l.other}">
         <span>${esc(nodeName(l.other))}</span>
@@ -303,6 +401,12 @@ function renderDrawer() {
     </section>
     ${jobs.length ? `<section><h3>Recent requests</h3>${jobs.map(jobHtml).join("")}</section>` : ""}
     ${n.isLocal ? "" : `<section><button class="danger" id="forgetBtn">${S.forgetArmed === n.num ? "Click again to forget this node" : "Forget this node"}</button></section>`}`;
+  $("#drawerAnt").onchange = async e => {
+    try {
+      await api("/api/node-settings", { node: n.num, antennaHeight: e.target.value });
+      toast(e.target.value ? `Antenna height set to ${e.target.value} m` : "Antenna height reset to default", true);
+    } catch (err) { toast(err.message); }
+  };
   const f = $("#forgetBtn");
   if (f) f.onclick = async () => {
     if (S.forgetArmed === n.num) {
@@ -336,14 +440,78 @@ function ensureMap() {
   L.control.layers(layers).addTo(M.map);
   L.control.scale({ imperial: true }).addTo(M.map);
   M.edges = L.layerGroup().addTo(M.map);
+  M.map.on("click", () => { if (B.popup && M.map.hasLayer(B.popup)) M.map.closePopup(B.popup); });
+  VIEWS.live?.mapReady?.(M.map);
 }
-function popupHtml(n) {
-  return `<div class="pop"><h4>${esc(n.longName || n.id)}</h4>
+
+/* Info bubble: opens on hover; moving into it keeps it open (so its buttons can be used);
+   clicking the node or the bubble pins it until it's closed with × or a click on the map. */
+const B = { popup: null, num: null, pinned: false, timer: 0, html: "" };
+function ensureBubble() {
+  if (B.popup) return;
+  B.popup = L.popup({ className: "bubble", autoPan: false, closeButton: true, closeOnClick: false, autoClose: false,
+    offset: [0, -4], maxWidth: 340, minWidth: 220 });
+  B.popup.on("add", () => {
+    const el = B.popup.getElement();
+    if (!el || el._wired) return;
+    el._wired = true;
+    el.addEventListener("mouseenter", () => clearTimeout(B.timer));
+    el.addEventListener("mouseleave", () => { if (!B.pinned) scheduleBubbleClose(); });
+    el.addEventListener("click", e => { if (!e.target.closest(".leaflet-popup-close-button")) pinBubble(true); });
+    L.DomEvent.disableClickPropagation(el);
+    L.DomEvent.disableScrollPropagation(el);
+  });
+  B.popup.on("remove", () => { B.num = null; B.pinned = false; B.html = ""; });
+}
+function bubbleHtml(n) {
+  const ln = localNode();
+  const dist = hasPos(ln) && !n.isLocal ? hav(ln.lat, ln.lon, n.lat, n.lon) : null;
+  const rows = [
+    ["Hops", n.isLocal ? "this radio" : (n.hopsAway ?? "?")],
+    ["Heard", n.isLocal ? "now" : ago(n.lastHeard)],
+    ["SNR", !n.isLocal && n.hopsAway === 0 ? fmtSnr(n.snr) : null],
+    ["Battery", n.battery == null ? null : n.battery > 100 ? "powered" : n.battery + "%"],
+    ["Distance", dist == null ? null : dist.toFixed(2) + " km"],
+    ["Role", n.role],
+    ["Links", S.snap.edges.filter(e => e.a === n.num || e.b === n.num).length],
+  ].filter(([, v]) => v != null && v !== "");
+  return `<div class="pop"><h4>${n.isLocal ? "" : `<button class="star${n.favorite ? " on" : ""}" data-fav="${n.num}">${n.favorite ? "★" : "☆"}</button>`}${esc(n.longName || n.id)}</h4>
     <div class="muted">${esc(n.id)} · ${esc(n.hwModel || "")}</div>
-    <div>${n.isLocal ? "This radio" : `Hops: ${n.hopsAway ?? "?"} · heard ${ago(n.lastHeard)}`}</div>
+    <div class="kv2">${rows.map(([k, v]) => `<span>${esc(k)}</span><span>${esc(v)}</span>`).join("")}</div>
     ${n.isLocal ? "" : actionButtons(n.num)}
-    <div class="acts"><button data-select="${n.num}">Details</button><button data-reach="${n.num}">Reach</button></div></div>`;
+    <div class="acts"><button data-select="${n.num}">Details</button><button data-reach="${n.num}">Reach</button>${n.isLocal ? "" : `<button data-dm="${n.num}">Message</button>`}</div>
+    <div class="pinhint">${B.pinned ? "Pinned · press × or click the map to close" : "Click the bubble to keep it open"}</div></div>`;
 }
+function openBubble(num, pin = false) {
+  const n = S.byNum.get(num);
+  if (!hasPos(n) || !M.map) return;
+  ensureBubble();
+  clearTimeout(B.timer);
+  if (B.pinned && B.num !== num && !pin) return; // a pinned bubble stays put while hovering others
+  const wasPinned = B.pinned && B.num === num;
+  B.num = num;
+  B.popup.setLatLng([n.lat, n.lon]);
+  if (!M.map.hasLayer(B.popup)) B.popup.openOn(M.map);
+  pinBubble(pin || wasPinned);
+}
+function pinBubble(p) {
+  B.pinned = p;
+  B.popup.getElement()?.classList.toggle("pinned", p);
+  refreshBubble(true);
+}
+function refreshBubble(force = false) {
+  if (!B.popup || B.num == null || !M.map?.hasLayer(B.popup)) return;
+  const n = S.byNum.get(B.num);
+  if (!hasPos(n)) { M.map.closePopup(B.popup); return; }
+  B.popup.setLatLng([n.lat, n.lon]);
+  const html = bubbleHtml(n);
+  if (force || html !== B.html) { B.html = html; B.popup.setContent(html); }
+}
+function scheduleBubbleClose() {
+  clearTimeout(B.timer);
+  B.timer = setTimeout(() => { if (!B.pinned && B.popup && M.map.hasLayer(B.popup)) M.map.closePopup(B.popup); }, 450);
+}
+
 function renderMap() {
   if (!M.map) return;
   const age = +$("#mapLinkAge").value;
@@ -354,10 +522,13 @@ function renderMap() {
   for (const n of nodes) {
     seen.add(n.num);
     let m = M.markers.get(n.num);
-    const style = { radius: n.isLocal ? 9 : 7, color: "#0b1015", weight: 2, fillColor: hopHex(n), fillOpacity: .95 };
+    const style = { radius: n.isLocal ? 9 : 7, color: n.favorite ? "#fbbf24" : "#0b1015", weight: n.favorite ? 3 : 2, fillColor: hopHex(n), fillOpacity: .95 };
     if (!m) {
+      const num = n.num;
       m = L.circleMarker([n.lat, n.lon], style).addTo(M.map);
-      m.bindPopup(() => popupHtml(S.byNum.get(n.num) || n));
+      m.on("mouseover", () => openBubble(num));
+      m.on("mouseout", () => { if (!B.pinned) scheduleBubbleClose(); });
+      m.on("click", e => { L.DomEvent.stopPropagation(e); openBubble(num, true); });
       M.markers.set(n.num, m);
     } else {
       m.setLatLng([n.lat, n.lon]);
@@ -366,7 +537,7 @@ function renderMap() {
     const lbl = labels ? shortName(n) : "";
     if (m._lbl !== lbl) {
       m.unbindTooltip();
-      if (lbl) m.bindTooltip(esc(lbl), { permanent: true, direction: "right", offset: [7, 0], className: "lbl" });
+      if (lbl) m.bindTooltip(esc(lbl), { permanent: true, direction: "right", offset: [7, 0], className: "lbl", interactive: false });
       m._lbl = lbl;
     }
     m.bringToFront();
@@ -388,6 +559,8 @@ function renderMap() {
         .addTo(M.edges);
     }
   }
+  for (const m of M.markers.values()) m.bringToFront();
+  refreshBubble();
   const missing = S.snap.nodes.length - nodes.length;
   const note = $("#mapNote");
   note.hidden = !(S.snap.nodes.length && !nodes.length);
@@ -423,7 +596,7 @@ function graphData() {
 function renderGraph(force = false) {
   const svg = $("#graph");
   const { nodes, edges } = graphData();
-  const sig = nodes.map(n => n.num).join(",") + "|" + edges.map(e => e.a + "-" + e.b).join(",");
+  const sig = nodes.map(n => n.num + (n.favorite ? "f" : "")).join(",") + "|" + edges.map(e => e.a + "-" + e.b).join(",");
   const local = S.snap.localNum;
   const structural = sig !== G.sig;
   for (const n of nodes) {
@@ -441,8 +614,8 @@ function renderGraph(force = false) {
       const snr = edgeSnr(e);
       return `<line class="edge" data-a="${e.a}" data-b="${e.b}" stroke="${snrColor(snr)}" stroke-opacity=".8" stroke-width="${1.5 + Math.min(3, Math.log2(1 + e.count) / 2)}"
         ${e.sources.every(s => s === "relay") ? 'stroke-dasharray="4 5"' : ""}><title>${esc(nodeName(e.a))} ⇄ ${esc(nodeName(e.b))}: SNR ${fmtSnr(e.snrAB)} / ${fmtSnr(e.snrBA)} (${esc(e.sources.join(", "))})</title></line>`;
-    }).join("")}</g><g class="nodes">${nodes.map(n => `
-      <g class="gnode" data-num="${n.num}"><circle r="${n.isLocal ? 11 : 8}" fill="${hopHex(n)}" stroke="#0b1015" stroke-width="2"></circle>
+    }).join("")}</g><g class="flows"></g><g class="nodes">${nodes.map(n => `
+      <g class="gnode${n.favorite ? " fav" : ""}" data-num="${n.num}"><circle r="${n.isLocal ? 11 : 8}" fill="${hopHex(n)}" stroke="${n.favorite ? "#fbbf24" : "#0b1015"}" stroke-width="${n.favorite ? 3 : 2}"></circle>
       <text x="12" y="4">${esc(shortName(n))}</text><title>${esc(n.longName || n.id)}</title></g>`).join("")}</g>`;
     if (structural) G.alpha = Math.max(G.alpha, force && !G.raf ? 1 : .6);
     G.nodes = nodes; G.edges = edges;
@@ -567,7 +740,7 @@ $("#topoRelayout").onclick = () => { G.pos.clear(); G.vel.clear(); G.sig = ""; G
 ["#topoLinkAge", "#topoIsolated"].forEach(s => $(s).addEventListener("input", () => renderGraph(true)));
 
 /* ---------------------------------------------------------------- reach */
-const R = { map: null, layer: null, fitKey: "" };
+const R = { map: null, layer: null, fitKey: "", heat: null };
 function ensureReachMap() {
   if (R.map) return;
   const layers = baseLayers();
@@ -575,13 +748,14 @@ function ensureReachMap() {
   layers["Topographic"].addTo(R.map);
   L.control.layers(layers).addTo(R.map);
   L.control.scale({ imperial: true }).addTo(R.map);
+  R.map.createPane("heat").style.zIndex = 350; // under the reach circles/markers
   R.layer = L.layerGroup().addTo(R.map);
 }
 function fillReachOrigins() {
   const sel = $("#reachOrigin");
   const cur = sel.value || (S.reachOrigin ?? S.snap.localNum);
-  const nodes = [...S.snap.nodes].sort((a, b) => (b.isLocal - a.isLocal) || (a.longName || a.id).localeCompare(b.longName || b.id));
-  const html = nodes.map(n => `<option value="${n.num}">${esc(n.longName || n.id)} (${esc(shortName(n))})${n.isLocal ? " - this radio" : ""}</option>`).join("");
+  const nodes = [...S.snap.nodes].sort((a, b) => (b.isLocal - a.isLocal) || (b.favorite - a.favorite) || (a.longName || a.id).localeCompare(b.longName || b.id));
+  const html = nodes.map(n => `<option value="${n.num}">${n.favorite ? "★ " : ""}${esc(n.longName || n.id)} (${esc(shortName(n))})${n.isLocal ? " - this radio" : ""}</option>`).join("");
   if (sel.dataset.sig !== html) { sel.innerHTML = html; sel.dataset.sig = html; }
   if (cur != null && S.byNum.has(+cur)) sel.value = cur;
 }
@@ -615,28 +789,33 @@ function drawReach(q) {
   const fallback = +$("#reachRadius").value;
   const circles = $("#reachCircles").checked;
 
-  // coverage footprints (drawn first, underneath)
+  // coverage footprints (drawn first, underneath): solid enough to read, with a darker rim
   if (circles) {
-    for (const [num, h] of hops) {
+    const order = [...hops].sort((a, b) => b[1] - a[1]); // far hops first, origin on top
+    for (const [num, h] of order) {
       const n = S.byNum.get(num);
       if (!hasPos(n)) continue;
       const rad = r.radiusKm[num] ?? fallback;
       if (!rad) continue;
-      L.circle([n.lat, n.lon], { radius: rad * 1000, stroke: false, fillColor: REACH_COLORS[Math.min(h, 7)], fillOpacity: h === 0 ? .14 : .09, interactive: false }).addTo(R.layer);
+      const c = REACH_COLORS[Math.min(h, 7)];
+      L.circle([n.lat, n.lon], {
+        radius: rad * 1000, color: shade(c, -0.5), weight: h === 0 ? 3 : 2, opacity: .95,
+        fillColor: c, fillOpacity: h === 0 ? .32 : .24, interactive: false,
+      }).addTo(R.layer);
     }
   }
   // flood tree
   for (const t of r.tree) {
     const a = S.byNum.get(t.parent), b = S.byNum.get(t.child);
     if (!hasPos(a) || !hasPos(b)) continue;
-    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: REACH_COLORS[Math.min(hops.get(t.child), 7)], weight: 3, opacity: .9 })
+    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: REACH_COLORS[Math.min(hops.get(t.child), 7)], weight: 3, opacity: .95 })
       .bindTooltip(`${esc(nodeName(t.parent))} → ${esc(nodeName(t.child))} (hop ${hops.get(t.child)})`, { sticky: true }).addTo(R.layer);
   }
   // nodes past the hop limit that would hear the final rebroadcast
   for (const num of r.beyond) {
     const n = S.byNum.get(num);
     if (!hasPos(n)) continue;
-    L.circleMarker([n.lat, n.lon], { radius: 6, color: "#94a3b8", weight: 2, dashArray: "2 3", fillOpacity: 0 })
+    L.circleMarker([n.lat, n.lon], { radius: 6, color: "#cbd5e1", weight: 2, dashArray: "2 3", fillOpacity: 0 })
       .bindTooltip(`${esc(nodeName(num))}: one hop past the limit (not reached)`).addTo(R.layer);
   }
   // unreached nodes, faint
@@ -676,8 +855,8 @@ function drawReach(q) {
     ${!hasPos(origin) ? `<p class="muted small">This node has no position, so it can't be drawn on the map, but its flood is still computed.</p>` : ""}
     ${perHop.length ? `<div class="hopbars">${perHop.map(([h, c]) => `<div><span>hop ${h}</span><span class="bar" style="--c:${REACH_COLORS[Math.min(+h, 7)]};width:${c / maxCount * 100}%"></span><span>${c}</span></div>`).join("")}</div>` : ""}
     ${noPos.length ? `<div><b class="small">Reached, no position (${noPos.length})</b><div class="reach-list">${noPos.map(n => `<div data-select="${n}">hop ${hops.get(n)} · ${esc(nodeName(n))}</div>`).join("")}</div></div>` : ""}`;
-  $("#reachLegend").innerHTML = `<b>Hop</b>` + REACH_COLORS.slice(0, +$("#reachHops").value + 1).map((c, i) => `<div><i style="--c:${c}"></i>${i === 0 ? "origin" : i}</div>`).join("")
-    + `<div><i style="--c:transparent;border:2px dashed #94a3b8;width:12px;height:12px"></i>past limit</div><div><i style="--c:#334155"></i>not reached</div>`;
+  $("#reachLegend").innerHTML = `<b>Hop</b>` + REACH_COLORS.slice(0, +$("#reachHops").value + 1).map((c, i) => `<div><i style="--c:${c};border:2px solid ${shade(c, -0.5)}"></i>${i === 0 ? "origin" : i}</div>`).join("")
+    + `<div><i style="--c:transparent;border:2px dashed #cbd5e1;width:12px;height:12px"></i>past limit</div><div><i style="--c:#334155"></i>not reached</div>`;
 }
 $("#reachHops").addEventListener("input", () => { $("#reachHopsVal").textContent = $("#reachHops").value; scheduleReach(150); });
 $("#reachRadius").addEventListener("input", () => { $("#reachRadiusVal").textContent = $("#reachRadius").value; if (S.reach) drawReach(S.reachQ); });
@@ -685,6 +864,45 @@ $("#reachRadius").addEventListener("input", () => { $("#reachRadiusVal").textCon
   if (s === "#reachOrigin") S.reachOrigin = +$(s).value;
   scheduleReach(0);
 }));
+
+/* ----------------------------------------------------- terrain heatmap */
+function heatNodes() {
+  const scope = $("#heatScope").value;
+  let nums;
+  if (scope === "origin") nums = [+$("#reachOrigin").value];
+  else if (scope === "reached") nums = Object.keys(S.reach?.hops || {}).map(Number);
+  else nums = S.snap.nodes.filter(n => n.favorite).map(n => n.num);
+  return nums.filter(num => hasPos(S.byNum.get(num)));
+}
+$("#heatRadius").addEventListener("input", () => { $("#heatRadiusVal").textContent = $("#heatRadius").value; });
+$("#heatRun").onclick = async () => {
+  const nodes = heatNodes();
+  if (!nodes.length) { toast("None of those nodes has a known position"); return; }
+  const btn = $("#heatRun");
+  btn.disabled = true;
+  const t0 = Date.now();
+  $("#heatInfo").textContent = `Computing coverage for ${nodes.length} transmitter${nodes.length > 1 ? "s" : ""}… (the first run downloads elevation tiles)`;
+  const tick = setInterval(() => { $("#heatInfo").textContent = $("#heatInfo").textContent.replace(/ \d+s$/, "") + ` ${Math.round((Date.now() - t0) / 1000)}s`; }, 1000);
+  try {
+    const gain = +$("#heatGain").value;
+    const r = await api("/api/coverage", { nodes, params: {
+      radiusKm: +$("#heatRadius").value, preset: $("#heatPreset").value, txPower: +$("#heatPower").value,
+      txGain: gain, rxGain: gain, environment: $("#heatEnv").value, rxHeight: +$("#heatRxH").value,
+    } });
+    if (R.heat) R.heat.remove();
+    R.heat = L.imageOverlay(r.image, r.bounds, { opacity: .85, interactive: false, pane: "heat" }).addTo(R.map);
+    $("#heatLegend").hidden = false;
+    $("#heatInfo").innerHTML = `<b>${r.areaKm2} km²</b> predicted coverage · ${r.seconds}s · elevation zoom ${r.zoom} (${r.stepM} m steps)<br>`
+      + r.transmitters.map(t => `${esc(nodeName(t.num))}: ground ${t.groundM} m, antenna ${t.antennaM} m, mean reach ${t.meanReachKm} km`).join("<br>");
+    if (nodes.length === 1 && hasPos(S.byNum.get(nodes[0]))) R.map.fitBounds(r.bounds, { padding: [20, 20] });
+  } catch (e) {
+    $("#heatInfo").textContent = "Failed: " + e.message;
+  } finally {
+    clearInterval(tick);
+    btn.disabled = false;
+  }
+};
+$("#heatClear").onclick = () => { if (R.heat) { R.heat.remove(); R.heat = null; } $("#heatLegend").hidden = true; $("#heatInfo").textContent = ""; };
 
 /* ---------------------------------------------------------------- activity */
 function routeHtml(label, hops) {
@@ -702,24 +920,49 @@ function jobHtml(j) {
 function renderActivity() {
   $("#jobs").innerHTML = S.snap.jobs.length ? S.snap.jobs.map(jobHtml).join("")
     : `<p class="muted">No requests yet. Use Trace / Ping / Info on any node.</p>`;
-  const rxOnly = $("#logRxOnly").checked;
-  const kindTxt = { rx: "rx", tx: "tx", job: "done", conn: "conn", error: "err" };
-  $("#log").innerHTML = [...S.snap.log].reverse().filter(l => !rxOnly || l.kind === "rx").map(l =>
-    `<div><span class="t">${clock(l.t)}</span><span class="k k-${esc(l.kind)}">${kindTxt[l.kind] || esc(l.kind)}</span><span>${esc(l.text)}${l.kind === "rx" ? `<span class="muted">${l.hops != null ? ` · ${l.hops} hop` : ""}${l.snr != null ? ` · ${l.snr} dB` : ""}${l.mqtt ? " · mqtt" : ""}</span>` : ""}</span></div>`).join("");
+  const rxOnly = $("#logRxOnly").checked, textOnly = $("#logTextOnly").checked, hideMqtt = $("#logHideMqtt").checked;
+  const kindTxt = { rx: "rx", tx: "tx", job: "done", conn: "conn", error: "err", mqtt: "mqtt", notify: "addon" };
+  $("#log").innerHTML = [...S.snap.log].reverse().filter(l =>
+    (!rxOnly || l.kind === "rx") && (!textOnly || l.port === "TEXT_MESSAGE_APP") && (!hideMqtt || !(l.mqtt || l.kind === "mqtt"))
+  ).map(l =>
+    `<div><span class="t">${clock(l.t)}</span><span class="k k-${esc(l.kind)}">${kindTxt[l.kind] || esc(l.kind)}</span><span>${esc(l.text)}${l.kind === "rx" ? `<span class="muted">${l.hops != null ? ` · ${l.hops} hop` : ""}${l.snr != null ? ` · ${l.snr} dB` : ""}</span>${l.src === "mqtt" ? ' <span class="tag mqtt">via MQTT</span>' : ""}` : ""}</span></div>`).join("");
 }
-$("#logRxOnly").addEventListener("input", renderActivity);
+["#logRxOnly", "#logTextOnly", "#logHideMqtt"].forEach(s => $(s).addEventListener("input", renderActivity));
+
+/* addon notifications pop up as toasts */
+SNAP_HOOKS.push(snap => {
+  const notes = snap.log.filter(l => l.kind === "notify");
+  const top = Math.max(0, ...snap.log.map(l => l.seq));
+  if (S.notifySeq == null || top < S.notifySeq) { S.notifySeq = top; return; } // first load / state swap
+  for (const l of notes) if (l.seq > S.notifySeq) toast(l.text, true);
+  S.notifySeq = top;
+});
 
 /* ---------------------------------------------------------------- wiring */
 $("#refreshPorts").onclick = loadPorts;
 $("#connectBtn").onclick = async () => {
-  const port = $("#portSelect").value;
-  if (!port) { toast("Plug in a Meshtastic radio over USB, then press ↻ to rescan."); return; }
-  try { await api("/api/connect", { port }); } catch (e) { toast(e.message); }
+  const v = $("#portSelect").value;
+  if (!v) { toast("Plug in a Meshtastic radio over USB, then press ↻ to rescan."); return; }
+  try {
+    if (v.startsWith("my:")) await api("/api/connect", { myNode: +v.slice(3) });
+    else await api("/api/connect", { port: v });
+  } catch (e) { toast(e.message); }
 };
 $("#demoBtn").onclick = () => api("/api/connect", { demo: true }).catch(e => toast(e.message));
 $("#disconnectBtn").onclick = () => api("/api/disconnect", {}).catch(e => toast(e.message));
 document.addEventListener("keydown", e => { if (e.key === "Escape" && S.selected != null) $("#drawerClose").click(); });
 setInterval(() => { if (S.snap && S.tab === "nodes") renderNodes(); }, 15000); // keep "x ago" fresh
 
-loadPorts();
-poll();
+async function loadInfo() {
+  try {
+    S.info = await api("/api/info");
+    $(".brand span").title = `MeshScope ${S.info.version}`;
+    $("#heatPreset").innerHTML = Object.entries(S.info.presets).map(([k, p]) => `<option value="${k}" ${k === "LONG_FAST" ? "selected" : ""}>${esc(p.label)}</option>`).join("");
+  } catch (e) { console.error(e); }
+}
+
+function boot() {
+  loadInfo();
+  loadPorts();
+  poll();
+}

@@ -5,11 +5,13 @@ from __future__ import annotations
 import logging
 import threading
 import time
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional, Sequence
 
 from google.protobuf import json_format
 from pubsub import pub
 
+from .ingest import PacketProcessor
+from .meshcrypto import expand_psk, preset_channel_name
 from .state import BROADCAST_NUM, MeshState
 
 log = logging.getLogger(__name__)
@@ -25,83 +27,123 @@ KNOWN_VIDS = {
     0x2E8A: "Raspberry Pi RP2040",
 }
 
-UNKNOWN_SNR = -128
-
 
 def list_ports() -> List[Dict[str, Any]]:
     from serial.tools import list_ports as lp
 
     out = []
     for p in lp.comports():
-        likely = p.vid in KNOWN_VIDS
         out.append({
             "device": p.device,
             "description": p.description,
             "manufacturer": p.manufacturer,
             "vid": p.vid,
             "pid": p.pid,
+            "serial": p.serial_number,
+            "location": p.location,
             "chip": KNOWN_VIDS.get(p.vid),
-            "likelyMeshtastic": likely,
+            "likelyMeshtastic": p.vid in KNOWN_VIDS,
         })
     out.sort(key=lambda d: (not d["likelyMeshtastic"], d["device"]))
     return out
 
 
-class Radio:
-    """Owns the meshtastic SerialInterface and translates packets into MeshState updates."""
+class _NotTheRadio(Exception):
+    pass
+
+
+class Radio(PacketProcessor):
+    """Owns the meshtastic SerialInterface; packets flow through PacketProcessor into MeshState."""
 
     ACTIONS = ("traceroute", "ping", "nodeinfo", "position", "telemetry")
+    SOURCE = "radio"
 
     def __init__(self, state: MeshState):
-        self.state = state
+        super().__init__(state)
         self.iface = None
+        self.port: Optional[str] = None
         self._send_lock = threading.Lock()
         self._connect_lock = threading.Lock()
         self._subscribed = False
         self._connecting = False
+        # hooks set by the App
+        self.on_connected: Optional[Callable[[str, Any], None]] = None
+        self.on_log_line: Optional[Callable[[str], None]] = None
 
     # ------------------------------------------------------------ lifecycle
     def _subscribe(self):
         if self._subscribed:
             return
         pub.subscribe(self._on_receive, "meshtastic.receive")
-        pub.subscribe(self._on_established, "meshtastic.connection.established")
         pub.subscribe(self._on_lost, "meshtastic.connection.lost")
         pub.subscribe(self._on_node_updated, "meshtastic.node.updated")
+        pub.subscribe(self._on_log_line, "meshtastic.log.line")
         self._subscribed = True
 
     @property
     def connected(self) -> bool:
         return self.iface is not None and self.state.status == "connected"
 
-    def connect(self, port: str):
-        """Connect in a background thread (the library blocks while it downloads the node DB)."""
+    def connect(self, ports: Sequence[str] | str, expect_num: Optional[int] = None, label: Optional[str] = None):
+        """Connect in a background thread.
+
+        ``ports`` may be several candidates; with ``expect_num`` each is opened in turn until
+        the radio whose node number matches is found (COM numbers can change between sessions).
+        """
+        ports = [ports] if isinstance(ports, str) else list(ports)
+        if not ports:
+            raise RuntimeError("No serial port to try")
         if not self._connect_lock.acquire(blocking=False):
             raise RuntimeError("A connection attempt is already in progress")
         self.disconnect()
-        self.state.set_status("connecting", f"Opening {port}...", port=port)
-        threading.Thread(target=self._connect_worker, args=(port,), daemon=True, name="connect").start()
+        what = label or ports[0]
+        self.state.set_status("connecting", f"Opening {what}...", port=ports[0])
+        threading.Thread(target=self._connect_worker, args=(ports, expect_num, label), daemon=True,
+                         name="connect").start()
 
-    def _connect_worker(self, port: str):
+    def _connect_worker(self, ports: List[str], expect_num: Optional[int], label: Optional[str]):
+        import meshtastic.serial_interface
+
+        errors = []
         try:
-            import meshtastic.serial_interface
-
             self._subscribe()
-            self._connecting = True
-            iface = meshtastic.serial_interface.SerialInterface(devPath=port, timeout=60)
-            self.iface = iface
-            self._connecting = False
-            self._import_device_state()
-            self.state.set_status("connected", "", port=port)
-            self.state.add_log("conn", f"Connected to {self.state.name_of(self.state.local_num)} on {port}")
-        except (Exception, SystemExit) as e:  # noqa: BLE001 - the library sys.exit()s on some errors
-            log.exception("Connect failed")
+            for port in ports:
+                if expect_num is not None:
+                    self.state.set_status("connecting", f"Looking for {label or expect_num} on {port}...", port=port)
+                iface = None
+                try:
+                    self._connecting = True
+                    iface = meshtastic.serial_interface.SerialInterface(devPath=port, timeout=60)
+                    num = iface.myInfo.my_node_num if iface.myInfo else None
+                    if expect_num is not None and num != expect_num:
+                        raise _NotTheRadio(f"{port} is a different radio (!{(num or 0):08x})")
+                    self.iface, self.port = iface, port
+                    self._connecting = False
+                    self._import_device_state()
+                    self.state.set_status("connected", "", port=port)
+                    self.state.add_log("conn", f"Connected to {self.state.name_of(self.state.local_num)} on {port}")
+                    if self.on_connected:
+                        self.on_connected(port, iface)
+                    return
+                except (Exception, SystemExit) as e:  # noqa: BLE001 - the library sys.exit()s on some errors
+                    self._connecting = False
+                    if iface is not None and self.iface is not iface:
+                        try:
+                            iface.close()
+                        except Exception:
+                            pass
+                    msg = str(e) or e.__class__.__name__
+                    if "PermissionError" in repr(e) or "Access is denied" in msg:
+                        msg = f"{port} is in use by another program (close the Meshtastic app / other serial monitors)."
+                    if not isinstance(e, _NotTheRadio):
+                        log.warning("Connect to %s failed: %s", port, msg)
+                    errors.append(msg)
             self.iface = None
-            msg = str(e) or e.__class__.__name__
-            if "PermissionError" in repr(e) or "Access is denied" in msg:
-                msg = f"{port} is in use by another program (close the Meshtastic app / other serial monitors)."
-            self.state.set_status("error", msg, port=port)
-            self.state.add_log("error", f"Connect to {port} failed: {msg}")
+            msg = "; ".join(errors) if len(ports) > 1 or not errors else errors[0]
+            if expect_num is not None:
+                msg = f"{label or expect_num} was not found on {', '.join(ports)}. ({msg})"
+            self.state.set_status("error", msg, port=ports[-1])
+            self.state.add_log("error", f"Connect failed: {msg}")
         finally:
             self._connecting = False
             self._connect_lock.release()
@@ -116,13 +158,20 @@ class Radio:
         except Exception:
             st.hop_limit = 3
         now = time.time()
-        for d in (iface.nodesByNum or {}).values():
+        for d in list((iface.nodesByNum or {}).values()):
             st.merge_lib_node(d)
             # Nodes the radio itself reports at 0 hops are direct RF neighbours
             if (d.get("hopsAway") == 0 and d.get("num") != st.local_num and not d.get("viaMqtt")
                     and d.get("lastHeard") and st.local_num is not None):
                 st.add_link(d["num"], st.local_num, d.get("snr"), "nodedb", ts=min(now, d["lastHeard"]))
-        st.merge_node(st.local_num, hopsAway=0, lastHeard=now)
+        st.merge_node(st.local_num, hopsAway=0, lastHeard=now, lastHeardRf=now)
+        self.refresh_channels()
+
+    def refresh_channels(self):
+        try:
+            self.state.set_channels(self.channels())
+        except Exception:
+            log.exception("reading channels failed")
 
     def disconnect(self):
         iface, self.iface = self.iface, None
@@ -132,24 +181,23 @@ class Radio:
             except Exception:
                 log.exception("Error closing interface")
             self.state.add_log("conn", "Disconnected")
+        if self.state.channels:
+            self.state.set_channels([])
         if self.state.status != "disconnected":
             self.state.set_status("disconnected")
 
     # ------------------------------------------------------- pubsub handlers
-    def _on_established(self, interface, topic=pub.AUTO_TOPIC):
-        pass
-
-    def _on_lost(self, interface, topic=pub.AUTO_TOPIC):
-        if interface is self.iface:
-            self.iface = None
-            self.state.set_status("error", "Connection to the radio was lost (cable unplugged?)")
-            self.state.add_log("error", "Connection lost")
-
     def _owns(self, interface) -> bool:
         if interface is None or interface is self.iface:
             return True
         # while connecting, the library publishes before SerialInterface() returns
         return self.iface is None and self._connecting
+
+    def _on_lost(self, interface, topic=pub.AUTO_TOPIC):
+        if interface is self.iface and self.iface is not None:
+            self.iface = None
+            self.state.set_status("error", "Connection to the radio was lost (cable unplugged?)")
+            self.state.add_log("error", "Connection lost")
 
     def _on_node_updated(self, node, interface=None):
         if not self._owns(interface):
@@ -167,153 +215,35 @@ class Radio:
         except Exception:
             log.exception("Packet handling failed: %r", {k: v for k, v in packet.items() if k != "raw"})
 
-    # ------------------------------------------------------ packet handling
-    def handle_packet(self, p: Dict[str, Any]):
-        st = self.state
-        frm = p.get("from")
-        to = p.get("to")
-        if frm is None:
-            return
-        local = st.local_num
-        decoded = p.get("decoded") or {}
-        port = decoded.get("portnum", "ENCRYPTED" if "encrypted" in p else "UNKNOWN")
-        rx_time = p.get("rxTime") or time.time()
-        snr = p.get("rxSnr")
-        rssi = p.get("rxRssi")
-        via_mqtt = bool(p.get("viaMqtt"))
-        hop_start = p.get("hopStart")
-        hop_limit = p.get("hopLimit", 0)
-        hops = (hop_start - hop_limit) if hop_start else None
-
-        if frm != local:
-            fields = dict(lastHeard=rx_time, viaMqtt=via_mqtt)
-            if hops is not None:
-                fields["hopsAway"] = hops
-            if hops == 0:
-                fields["snr"] = snr
-                fields["rssi"] = rssi
-            st.merge_node(frm, **fields)
-
-            # ---- link inference from how the packet reached us
-            if local is not None and not via_mqtt and hops is not None:
-                if hops == 0:
-                    st.add_link(frm, local, snr, "direct", ts=rx_time)
-                else:
-                    relay = self._resolve_relay(p.get("relayNode"))
-                    if relay is not None and relay != frm:
-                        st.add_link(relay, local, snr, "relay", ts=rx_time)
-                        if hops == 1:
-                            st.add_link(frm, relay, None, "relay", ts=rx_time)
-
-        st.add_log("rx", f"{port} from {st.name_of(frm)}"
-                   + (f" to {st.name_of(to)}" if to not in (BROADCAST_NUM, None) else ""),
-                   port=port, frm=frm, to=to, snr=snr, rssi=rssi, hops=hops, mqtt=via_mqtt)
-
-        if port == "TRACEROUTE_APP":
-            self._handle_traceroute(p, decoded)
-        elif port == "NEIGHBORINFO_APP":
-            self._handle_neighborinfo(p, decoded)
-        elif port == "TELEMETRY_APP":
-            self._handle_telemetry(p, decoded)
-        elif port == "POSITION_APP":
-            self._handle_position(p, decoded)
-        elif port == "NODEINFO_APP":
-            self._handle_nodeinfo(p, decoded)
-
-        req = decoded.get("requestId")
-        if req is not None:
-            self._resolve_job(p, decoded, int(req), port)
-
-    def _resolve_relay(self, relay_byte) -> Optional[int]:
-        """Map the 1-byte relay_node hint onto a unique node we hear directly."""
-        if not relay_byte:
-            return None
-        st = self.state
-        cands = [n for n, d in st.nodes.items()
-                 if (n & 0xFF) == relay_byte and n != st.local_num and d.get("hopsAway") == 0]
-        if len(cands) == 1:
-            return cands[0]
-        return None
-
-    # ---- per-port decoders -------------------------------------------------
-    def _handle_traceroute(self, p, decoded):
-        from meshtastic.protobuf import mesh_pb2
-
-        payload = decoded.get("payload")
-        if not payload or decoded.get("requestId") is None:
-            return  # a request passing through, not a reply
-        rd = mesh_pb2.RouteDiscovery()
-        rd.ParseFromString(payload)
-        origin, dest = p.get("to"), p.get("from")
-        st = self.state
-        ts = p.get("rxTime") or time.time()
-
-        def scale(vals):
-            return [None if v == UNKNOWN_SNR else v / 4.0 for v in vals]
-
-        fwd = [origin] + list(rd.route) + [dest]
-        fsnr = scale(rd.snr_towards)
-        for i in range(len(fwd) - 1):
-            st.add_link(fwd[i], fwd[i + 1], fsnr[i] if i < len(fsnr) else None, "traceroute", ts=ts)
-
-        back = None
-        bsnr: List[Optional[float]] = []
-        if p.get("hopStart") is not None:
-            back = [dest] + list(rd.route_back) + [origin]
-            bsnr = scale(rd.snr_back)
-            # the final hop back to us is measured locally on the response packet itself
-            if len(bsnr) < len(back) - 1 and p.get("rxSnr") is not None:
-                bsnr.append(p.get("rxSnr"))
-            for i in range(len(back) - 1):
-                st.add_link(back[i], back[i + 1], bsnr[i] if i < len(bsnr) else None, "traceroute", ts=ts)
-
-        st.merge_node(dest, hopsAway=len(rd.route))
-        result = {
-            "towards": [{"num": n, "name": st.name_of(n), "snr": (fsnr[i - 1] if 0 < i <= len(fsnr) else None)}
-                        for i, n in enumerate(fwd)],
-            "back": None if back is None else
-                    [{"num": n, "name": st.name_of(n), "snr": (bsnr[i - 1] if 0 < i <= len(bsnr) else None)}
-                     for i, n in enumerate(back)],
-        }
-        decoded["_meshscope_traceroute"] = result
-
-    def _handle_neighborinfo(self, p, decoded):
-        from meshtastic.protobuf import mesh_pb2
-
-        payload = decoded.get("payload")
-        if not payload:
-            return
-        ni = mesh_pb2.NeighborInfo()
-        ni.ParseFromString(payload)
-        reporter = ni.node_id or p.get("from")
-        ts = p.get("rxTime") or time.time()
-        for nb in ni.neighbors:
-            self.state.add_link(nb.node_id, reporter, nb.snr, "neighborinfo", ts=ts)
-
-    def _handle_telemetry(self, p, decoded):
-        t = decoded.get("telemetry") or {}
-        dm = t.get("deviceMetrics")
-        if dm:
-            self.state.merge_node(p["from"], battery=dm.get("batteryLevel"), voltage=dm.get("voltage"),
-                                  chUtil=dm.get("channelUtilization"), airUtilTx=dm.get("airUtilTx"),
-                                  uptime=dm.get("uptimeSeconds"))
-
-    def _handle_position(self, p, decoded):
-        pos = decoded.get("position") or {}
-        lat, lon = pos.get("latitude"), pos.get("longitude")
-        if lat is None and pos.get("latitudeI") is not None:
-            lat, lon = pos["latitudeI"] * 1e-7, pos.get("longitudeI", 0) * 1e-7
-        if lat is not None and lon is not None and not (abs(lat) < 1e-6 and abs(lon) < 1e-6):
-            self.state.merge_node(p["from"], lat=lat, lon=lon, alt=pos.get("altitude"),
-                                  positionTime=pos.get("time") or time.time())
-
-    def _handle_nodeinfo(self, p, decoded):
-        u = decoded.get("user") or {}
-        if u:
-            self.state.merge_node(p["from"], longName=u.get("longName"), shortName=u.get("shortName"),
-                                  hwModel=u.get("hwModel"), role=u.get("role", "CLIENT"))
+    def _on_log_line(self, line, interface=None):
+        if self._owns(interface) and self.on_log_line:
+            self.on_log_line(line)
 
     # ---- request/response matching ----------------------------------------
+    def after_packet(self, p, decoded, port, source):
+        req = decoded.get("requestId")
+        if req is not None and source in ("radio", "demo"):
+            self._resolve_job(p, decoded, int(req), port)
+            if port == "ROUTING_APP":
+                self._resolve_message_ack(p, decoded, int(req))
+
+    def _resolve_message_ack(self, p, decoded, req: int):
+        st = self.state
+        msg = st.find_outgoing_message(req)
+        if msg is None or msg.get("status") == "delivered":
+            return
+        err = (decoded.get("routing") or {}).get("errorReason", "NONE")
+        frm = p.get("from")
+        if err != "NONE":
+            st.update_message(msg, status="failed", error=err)
+        elif msg.get("dm") and frm == msg.get("to"):
+            st.update_message(msg, status="delivered", ackSnr=p.get("rxSnr"))
+        elif frm == st.local_num:
+            # implicit ACK: our radio heard a neighbour rebroadcast it (all a broadcast ever gets)
+            st.update_message(msg, status="heard")
+        else:
+            st.update_message(msg, status="delivered")
+
     def _resolve_job(self, p, decoded, req: int, port: str):
         st = self.state
         job = st.find_job_by_packet(req)
@@ -358,8 +288,7 @@ class Radio:
                 hops_to = len(res["towards"]) - 2
                 path = " > ".join(h["name"] for h in res["towards"])
                 how = "Direct (no relays)" if hops_to == 0 else f"{hops_to} relay hop(s)"
-                st.update_job(job, status="ok", result=res, rtt=elapsed,
-                              summary=f"{how} in {elapsed}s: {path}")
+                st.update_job(job, status="ok", result=res, rtt=elapsed, summary=f"{how} in {elapsed}s: {path}")
                 st.add_log("job", f"traceroute {job['targetName']}: {path}")
         elif kind == "nodeinfo" and port == "NODEINFO_APP":
             u = {k: v for k, v in (decoded.get("user") or {}).items() if k != "raw"}
@@ -383,6 +312,30 @@ class Radio:
                 parts.append(f"air tx {dm['airUtilTx']:.1f}%")
             st.update_job(job, status="ok", rtt=elapsed, result=dm, summary=", ".join(parts) or "Replied")
 
+    # -------------------------------------------------------------- channels
+    def channels(self) -> List[Dict[str, Any]]:
+        """The radio's enabled channels with resolved names and AES keys."""
+        if self.iface is None:
+            return []
+        from meshtastic.protobuf import config_pb2
+
+        ln = self.iface.localNode
+        try:
+            lora = ln.localConfig.lora
+            preset = preset_channel_name(config_pb2.Config.LoRaConfig.ModemPreset.Name(lora.modem_preset)) \
+                if lora.use_preset else "Custom"
+        except Exception:
+            preset = "LongFast"
+        out = []
+        for c in (ln.channels or []):
+            if not c.role:  # DISABLED
+                continue
+            name = c.settings.name or preset
+            out.append({"index": c.index, "name": name, "key": expand_psk(bytes(c.settings.psk)),
+                        "primary": c.role == 1, "uplinkEnabled": bool(c.settings.uplink_enabled),
+                        "defaultKey": len(c.settings.psk) == 1})
+        return out
+
     # -------------------------------------------------------------- actions
     def run_action(self, kind: str, target: int, hop_limit: Optional[int] = None) -> Dict[str, Any]:
         if kind not in self.ACTIONS:
@@ -398,11 +351,45 @@ class Radio:
         try:
             pkt = self._send(kind, target, hl)
             st.update_job(job, packetId=pkt.id)
-            st.add_log("tx", f"{kind} request to {st.name_of(target)} (hop limit {hl})")
+            path, known = st.guess_path(st.local_num, target)
+            st.add_log("tx", f"{kind} request to {st.name_of(target)} (hop limit {hl})",
+                       frm=st.local_num, to=target, port=kind, path=path, known=known, src=self.SOURCE)
         except Exception as e:
             st.update_job(job, status="failed", summary=f"Send failed: {e}")
             raise
         return job
+
+    MAX_TEXT_BYTES = 200
+
+    def send_text(self, text: str, dest: int | str = BROADCAST_NUM, channel: int = 0):
+        """Transmit a text message on a channel (broadcast) or as a DM, and track its ACK."""
+        if not self.connected:
+            raise RuntimeError("Not connected to a radio")
+        text = str(text or "").strip()
+        if not text:
+            raise ValueError("Message is empty")
+        if len(text.encode("utf-8")) > self.MAX_TEXT_BYTES:
+            raise ValueError(f"Message is too long (max {self.MAX_TEXT_BYTES} bytes)")
+        if isinstance(dest, str):
+            dest = BROADCAST_NUM if dest in ("^all", "") else int(dest.lstrip("!"), 16)
+        channel = int(channel or 0)
+        st = self.state
+        if channel and not any(c["index"] == channel for c in st.channels):
+            raise ValueError(f"Channel {channel} is not enabled on this radio")
+        pkt = self._transmit_text(text, dest, channel)
+        dm = dest != BROADCAST_NUM
+        st.add_message(packetId=pkt.id, **{"from": st.local_num}, to=dest, text=text, src=self.SOURCE,
+                       outgoing=True, dm=dm, channel=None if dm else channel,
+                       channelName=None if dm else next((c["name"] for c in st.channels if c["index"] == channel), None),
+                       status="sending")
+        st.add_log("tx", f'TEXT to {st.name_of(dest) if dm else "everyone"} on ch {channel}: "{text}"',
+                   frm=st.local_num, to=dest, port="TEXT_MESSAGE_APP", src=self.SOURCE,
+                   path=st.guess_path(st.local_num, dest)[0] if dm else None)
+        return pkt
+
+    def _transmit_text(self, text: str, dest: int, channel: int):
+        with self._send_lock:
+            return self.iface.sendText(text, destinationId=dest, channelIndex=channel, wantAck=True)
 
     def _send(self, kind: str, target: int, hop_limit: int):
         from meshtastic.protobuf import mesh_pb2, portnums_pb2, telemetry_pb2

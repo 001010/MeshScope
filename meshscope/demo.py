@@ -31,7 +31,42 @@ def demo_node_names(seed: int = 7, count: int = 26) -> dict:
     return {num: n["name"] for num, n in d.info.items()}
 
 
+CHATTER = ["anyone copy?", "checking in from the trailhead", "battery at 40%, heading home",
+            "test test", "good morning mesh", "copy, 2 hops", "weather looks rough up north", "ping"]
+
+
 class DemoRadio(Radio):
+    SOURCE = "demo"
+
+    DEMO_CHANNELS = [
+        {"index": 0, "name": "LongFast", "primary": True, "uplinkEnabled": False, "defaultKey": True, "key": b""},
+        {"index": 1, "name": "Trailhead", "primary": False, "uplinkEnabled": False, "defaultKey": False, "key": b""},
+    ]
+
+    def channels(self):
+        return [dict(c) for c in self.DEMO_CHANNELS]
+
+    def _transmit_text(self, text, dest, channel):
+        """Nothing is transmitted in demo mode; simulate the ACK the firmware would report."""
+        pid = self._next_id()
+
+        def ack():
+            time.sleep(self.rng.uniform(1.0, 2.5))
+            if dest == BROADCAST_NUM:
+                self.handle_packet({"from": self.local, "to": self.local, "decoded": {
+                    "portnum": "ROUTING_APP", "requestId": pid, "routing": {"errorReason": "NONE"}}})
+                return
+            back = self._path(dest, self.local, 3) if dest in self.truth else None
+            if back:
+                self._deliver(dest, self.local, "ROUTING_APP", request_id=pid, path=back,
+                              decoded_extra={"routing": {"errorReason": "NONE"}})
+            else:
+                self.handle_packet({"from": self.local, "to": self.local, "decoded": {
+                    "portnum": "ROUTING_APP", "requestId": pid, "routing": {"errorReason": "MAX_RETRANSMIT"}}})
+
+        threading.Thread(target=ack, daemon=True).start()
+        return SimpleNamespace(id=pid)
+
     def __init__(self, state, seed: int = 7, count: int = 26):
         super().__init__(state)
         self.rng = random.Random(seed)
@@ -119,6 +154,7 @@ class DemoRadio(Radio):
             })
             if len(path) == 2:  # the real radio reports these as 0-hop neighbours
                 st.add_link(num, self.local, self.truth[num][self.local], "nodedb")
+        st.set_channels(self.channels())
         st.set_status("connected", "Simulated mesh (demo mode)", port="DEMO")
         st.add_log("conn", "Demo mode started: simulated mesh around Denver, CO")
         threading.Thread(target=self._sim_loop, daemon=True, name="demo").start()
@@ -126,11 +162,13 @@ class DemoRadio(Radio):
     def disconnect(self):
         if self.state is not None and self.state.status != "disconnected":
             self._stop.set()
+            self.state.set_channels([])
             self.state.add_log("conn", "Demo stopped")
             self.state.set_status("disconnected")
 
     # --------------------------------------------------------- packet sim
-    def _deliver(self, src, dst, portnum, payload=b"", request_id=None, hop_start=3, path=None, decoded_extra=None):
+    def _deliver(self, src, dst, portnum, payload=b"", request_id=None, hop_start=3, path=None, decoded_extra=None,
+                 channel=0):
         """Simulate ``src`` flooding a packet and our radio receiving it via ``path``."""
         path = path or self._path(src, self.local, hop_start)
         if not path:
@@ -142,8 +180,9 @@ class DemoRadio(Radio):
             decoded["requestId"] = request_id
         if decoded_extra:
             decoded.update(decoded_extra)
+        decoded.setdefault("bitfield", 1)
         pkt = {
-            "from": src, "to": dst, "id": self._next_id(), "rxTime": int(time.time()),
+            "from": src, "to": dst, "id": self._next_id(), "rxTime": int(time.time()), "channel": channel,
             "rxSnr": self.truth[last_tx].get(self.local), "rxRssi": self.rng.randint(-125, -70),
             "hopStart": hop_start, "hopLimit": hop_start - hops,
             "relayNode": (last_tx & 0xFF) if hops > 0 else 0,
@@ -173,6 +212,14 @@ class DemoRadio(Radio):
             elif roll < 0.3 and n["gps"]:
                 self._deliver(src, BROADCAST_NUM, "POSITION_APP",
                               decoded_extra={"position": {"latitude": n["lat"], "longitude": n["lon"]}})
+            elif roll < 0.36:
+                txt = r.choice(CHATTER)
+                sub = r.random()
+                if sub < 0.15:  # a direct message to us
+                    self._deliver(src, self.local, "TEXT_MESSAGE_APP", txt.encode(), decoded_extra={"text": txt})
+                else:
+                    self._deliver(src, BROADCAST_NUM, "TEXT_MESSAGE_APP", txt.encode(), decoded_extra={"text": txt},
+                                  channel=1 if sub < 0.4 else 0)
             elif roll < 0.45:
                 self._deliver(src, BROADCAST_NUM, "NODEINFO_APP",
                               decoded_extra={"user": {"longName": n["name"], "shortName": n["short"],

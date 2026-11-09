@@ -88,6 +88,10 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Publish   # build, test, the
 It signs in with the same GitHub credential `git push` uses (Git Credential Manager) or `$env:GITHUB_TOKEN`, and refuses to publish
 unless the code is committed and pushed. `--replace` re-uploads the installer for an existing release; `--draft` keeps it unpublished.
 
+### Versioning
+
+MeshScope is in alpha testing, so versions are `0.<minor>.<patch>`: bump the minor number for a release with new features and the patch number for fixes. The first public release will be `1.0.0`. Builds made before this rule were numbered 1.0.0 to 1.1.0; they correspond to 0.1.0 to 0.2.0.
+
 When you release a new version, bump `__version__` in `meshscope/__init__.py`. Keep `UPGRADE_CODE` in `setup.py` unchanged, so that a new MSI upgrades an existing install instead of installing beside it.
 
 ## Layout

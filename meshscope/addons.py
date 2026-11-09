@@ -391,7 +391,7 @@ class AddonManager:
             return
         st = self.app.state
         pkt = strip_raw(p)
-        decoded = pkt.get("decoded") or {}
+        decoded = pkt.setdefault("decoded", {})  # empty for packets that couldn't be decrypted
         pkt.update({
             "source": source,
             "portnum": info.get("port") or decoded.get("portnum"),

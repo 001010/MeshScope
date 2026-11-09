@@ -75,6 +75,19 @@ To run it without building:
 `tests\screenshots.py <dir>` takes a headless-Edge screenshot of every tab in demo mode and fails on any UI script error.
 `tests\live_test.py COM9` and `tests\live_config_check.py COM9` check a real radio read-only. `tests\terrain_check.py` checks the coverage model (needs internet).
 
+### Publishing an installer
+
+Installers are published as **GitHub Releases** (not committed to git, which would bloat the history):
+
+```powershell
+powershell -ExecutionPolicy Bypass -File build.ps1 -Publish   # build, test, then publish
+.venv\Scripts\python tools\publish_release.py                # publish an already-built MSI
+```
+
+`publish_release.py` creates the release `v<version>` on the `origin` GitHub repo and attaches `dist\MeshScope-<version>-win64.msi`.
+It signs in with the same GitHub credential `git push` uses (Git Credential Manager) or `$env:GITHUB_TOKEN`, and refuses to publish
+unless the code is committed and pushed. `--replace` re-uploads the installer for an existing release; `--draft` keeps it unpublished.
+
 When you release a new version, bump `__version__` in `meshscope/__init__.py`. Keep `UPGRADE_CODE` in `setup.py` unchanged, so that a new MSI upgrades an existing install instead of installing beside it.
 
 ## Layout

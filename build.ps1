@@ -1,5 +1,7 @@
 # Builds dist\MeshScope-<version>-win64.msi
-# Usage:  powershell -ExecutionPolicy Bypass -File build.ps1
+# Usage:  powershell -ExecutionPolicy Bypass -File build.ps1 [-Publish]
+#   -Publish  also uploads the installer to a GitHub Release (tools\publish_release.py)
+param([switch]$Publish)
 $ErrorActionPreference = "Stop"
 Set-Location $PSScriptRoot
 
@@ -22,3 +24,8 @@ Remove-Item -Recurse -Force build, dist -ErrorAction SilentlyContinue
 if ($LASTEXITCODE -ne 0) { throw "MSI build failed" }
 
 Get-ChildItem dist\*.msi | ForEach-Object { Write-Host "Built $($_.FullName) ($([math]::Round($_.Length/1MB,1)) MB)" }
+
+if ($Publish) {
+    & $py tools\publish_release.py
+    if ($LASTEXITCODE -ne 0) { throw "Publishing failed" }
+}

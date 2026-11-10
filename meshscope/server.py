@@ -149,6 +149,19 @@ def make_handler(app: App):
             if path == "/api/favorite":
                 st.set_favorite(int(body["node"]), bool(body.get("favorite", True)))
                 return self._json({"ok": True})
+            if path == "/api/ui-settings":
+                patch = {}
+                if body.get("theme") in ("system", "day", "night"):
+                    patch["theme"] = body["theme"]
+                if body.get("units") in ("metric", "imperial"):
+                    patch["units"] = body["units"]
+                if not patch:
+                    raise ValueError("theme must be system/day/night and units metric/imperial")
+                app.real_state.update_settings({"ui": patch})
+                app.real_state.save(force=True)
+                if app.state is not app.real_state:
+                    app.state.update_settings({})  # demo shares the settings; bump its version so the UI refreshes
+                return self._json({"ok": True, "ui": app.real_state.settings["ui"]})
             if path == "/api/node-settings":
                 h = body.get("antennaHeight")
                 st.merge_node(int(body["node"]), antennaHeight=None if h in (None, "") else max(0.1, float(h)))

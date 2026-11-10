@@ -12,9 +12,10 @@ window.__errs = [];
 addEventListener("error", e => {
   __errs.push(`${(e.filename || "").split("/").pop()}:${e.lineno} ${e.message}`);
   const d = document.getElementById("jsErrors");
-  if (d) { d.textContent = __errs.join("
-"); d.hidden = false; }
+  if (d) { d.textContent = __errs.join("\n"); d.hidden = false; }
 });
+/* apply the system colour scheme before first paint; the saved Day/Night choice is applied once settings load */
+document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: light)").matches ? "light" : "dark";
 </script>
 </head>
 <body>
@@ -40,6 +41,24 @@ addEventListener("error", e => {
     <button id="connectBtn" class="primary">Connect</button>
     <button id="demoBtn" title="Explore the app with a simulated mesh">Demo</button>
     <button id="disconnectBtn" hidden>Disconnect</button>
+    <button id="settingsBtn" class="icon-btn" title="Settings" aria-haspopup="dialog" aria-expanded="false">&#x2699;&#xFE0E;</button>
+  </div>
+  <div class="settings-pop" id="settingsPop" role="dialog" aria-label="Settings" hidden>
+    <h3>Settings</h3>
+    <div class="set-row">
+      <span class="set-lab">Colour theme</span>
+      <div class="seg" data-setting="theme">
+        <button data-v="day">&#x2600;&#xFE0E; Day</button><button data-v="night">&#x263E;&#xFE0E; Night</button><button data-v="system">System</button>
+      </div>
+      <span class="muted small">System follows the Windows light/dark setting.</span>
+    </div>
+    <div class="set-row">
+      <span class="set-lab">Units</span>
+      <div class="seg" data-setting="units">
+        <button data-v="metric">Metric</button><button data-v="imperial">Imperial</button>
+      </div>
+      <span class="muted small">Distances, heights and areas: km, m, km² or mi, ft, mi².</span>
+    </div>
   </div>
 </header>
 
@@ -197,7 +216,7 @@ addEventListener("error", e => {
         </label>
         <label class="chk"><input type="checkbox" id="reachBidir" checked> Assume links are two-way</label>
         <label class="chk"><input type="checkbox" id="reachCircles" checked> Coverage circles</label>
-        <label class="field">Fallback radius for nodes with no measured link: <b id="reachRadiusVal">2</b> km
+        <label class="field">Fallback radius for nodes with no measured link: <b id="reachRadiusVal">2 km</b>
           <input type="range" id="reachRadius" min="0" max="15" step="0.5" value="2">
         </label>
         <div id="reachStats" class="reach-stats"></div>
@@ -229,9 +248,9 @@ addEventListener("error", e => {
                 <option value="dense_urban">Dense urban</option>
               </select>
             </label>
-            <label class="field">Receiver height (m)<input type="number" id="heatRxH" value="1.5" min="0.5" max="100" step="0.5"></label>
+            <label class="field">Receiver height (<span class="u-len">m</span>)<input type="number" id="heatRxH" data-unit="len" data-metric="1.5" value="1.5" min="0.1" step="0.5"></label>
           </div>
-          <label class="field">Radius: <b id="heatRadiusVal">15</b> km
+          <label class="field">Radius: <b id="heatRadiusVal">15 km</b>
             <input type="range" id="heatRadius" min="2" max="60" value="15">
           </label>
           <div class="row2">
@@ -243,6 +262,9 @@ addEventListener("error", e => {
       </aside>
       <div class="reach-mapwrap">
         <div id="reachMap" class="map"></div>
+        <div class="map-disclaimer" title="Node positions can be deliberately imprecise">
+          Estimates only. Node positions may be shifted or rounded by their owners for privacy and security, so reach and heatmap results can be off. Not for surveying.
+        </div>
         <div class="legend floating" id="reachLegend"></div>
         <div class="legend floating heat-legend" id="heatLegend" hidden>
           <b>Link margin</b><span class="grad"></span><div class="gradlab"><span>fringe</span><span>0 dB</span><span>+15</span><span>+30</span></div>
@@ -382,7 +404,7 @@ addEventListener("error", e => {
         </fieldset>
         <fieldset>
           <legend>Filtering & keys</legend>
-          <label class="field">Only keep nodes within (km of your radio, 0 = no limit)<input id="mqDist" type="number" min="0"></label>
+          <label class="field">Only keep nodes within (<span class="u-dist">km</span> of your radio, 0 = no limit)<input id="mqDist" type="number" min="0" data-unit="dist"></label>
           <label class="chk"><input type="checkbox" id="mqStrict"> Also drop nodes whose position is unknown</label>
           <label class="field"><span>Extra channel keys (<code>ChannelName=base64key</code>, one per line)</span>
             <textarea id="mqKeys" rows="3" spellcheck="false" placeholder="azmsh=AQ=="></textarea></label>

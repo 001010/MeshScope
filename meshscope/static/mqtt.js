@@ -45,7 +45,7 @@ function fillMqttForm(d) {
   $("#mqPass").value = s.password || "";
   $("#mqTls").checked = !!s.tls;
   $("#mqTopics").value = (s.topics || []).join("\n");
-  $("#mqDist").value = s.maxDistanceKm ?? 0;
+  setUnitVal($("#mqDist"), s.maxDistanceKm ?? 0);
   $("#mqStrict").checked = !!s.strictDistance;
   $("#mqKeys").value = (s.channelKeys || []).map(k => `${k.name}=${k.psk}`).join("\n");
   $("#mqUplink").checked = !!s.uplink;
@@ -72,7 +72,7 @@ function mqttFormValues() {
     host: $("#mqHost").value.trim(), port: +$("#mqPort").value || 1883,
     username: $("#mqUser").value, password: $("#mqPass").value, tls: $("#mqTls").checked,
     topics: $("#mqTopics").value.split("\n").map(t => t.trim()).filter(Boolean),
-    maxDistanceKm: +$("#mqDist").value || 0, strictDistance: $("#mqStrict").checked, channelKeys: keys,
+    maxDistanceKm: unitVal($("#mqDist")) || 0, strictDistance: $("#mqStrict").checked, channelKeys: keys,
     uplink: $("#mqUplink").checked, uplinkRoot: $("#mqRoot").value.trim() || "msh/US",
     uplinkDelay: Math.max(1, Math.min(60, +$("#mqDelay").value || 5)),
     uplinkChannels: $$("#mqChannels input:checked").map(i => i.dataset.upch),

@@ -178,6 +178,23 @@ def main():
     m2 = [m for m in call("/api/state")["messages"] if m["text"] == "rf only"][0]
     assert m2["src"] == "radio", m2
     print("mqtt badge ok: MQTT-only message flagged, cleared once heard over RF; radio packets never flagged")
+    # ---- user settings: theme + units (saved with the real state, visible while in demo mode)
+    call("/api/connect", {"demo": True})
+    assert call("/api/state")["settings"]["ui"] == {"theme": "system", "units": "metric"}
+    v0 = call("/api/state")["version"]
+    assert call("/api/ui-settings", {"theme": "night", "units": "imperial"})["ui"] == {"theme": "night", "units": "imperial"}
+    snap = call("/api/state")
+    assert snap["settings"]["ui"] == {"theme": "night", "units": "imperial"} and snap["version"] > v0, snap["settings"]["ui"]
+    for bad in ({"theme": "pink"}, {"units": "furlongs"}, {}):
+        try:
+            call("/api/ui-settings", bad)
+            raise AssertionError(f"accepted invalid settings {bad}")
+        except urllib.error.HTTPError as e:
+            assert e.code == 400, e.code
+    call("/api/ui-settings", {"theme": "day"})
+    assert json.loads((tmp / "db.json").read_text())["settings"]["ui"] == {"theme": "day", "units": "imperial"}
+    print("ui settings ok: theme/units saved, validated, and shown in demo mode")
+    call("/api/disconnect", {})
     srv.shutdown()
 
     # databases polluted by older versions get cleaned on startup

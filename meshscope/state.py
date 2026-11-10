@@ -48,6 +48,7 @@ DEFAULT_SETTINGS: Dict[str, Any] = {
     },
     "autoConnect": None,            # node number of a My Node to connect at startup
     "defaultAntennaHeight": 2.0,
+    "ui": {"theme": "system", "units": "metric"},  # theme: system|day|night; units: metric|imperial
 }
 
 
@@ -216,7 +217,10 @@ class MeshState:
 
     def update_settings(self, patch: Dict[str, Any]):
         with self._lock:
-            self.settings = _deep_merge(self.settings, patch)
+            merged = _deep_merge(self.settings, patch)
+            # update in place: demo mode shares this dict with the real state
+            self.settings.clear()
+            self.settings.update(merged)
             self._touch()
 
     # ------------------------------------------------------------ my nodes

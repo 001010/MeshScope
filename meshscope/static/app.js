@@ -125,6 +125,87 @@ function store(key, val) {
   } catch { return null; }
 }
 
+/* ------------------------------------------------------- user settings */
+const UI = { theme: "system", units: "metric" };
+const imperial = () => UI.units === "imperial";
+const KM_MI = 0.621371, M_FT = 3.28084;
+/** km -> "1.2 km" / "0.7 mi"; very short distances in m / ft */
+function fmtDist(km, d = 1) {
+  if (km == null) return "–";
+  if (imperial()) { const mi = km * KM_MI; return mi < 0.1 ? `${Math.round(km * 1000 * M_FT)} ft` : `${mi.toFixed(d)} mi`; }
+  return km < 0.1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(d)} km`;
+}
+/** heights / elevations, given in metres */
+const fmtLen = m => m == null ? "–" : imperial() ? `${Math.round(m * M_FT)} ft` : `${+(+m).toFixed(1)} m`;
+const fmtArea = km2 => imperial() ? `${(km2 * 0.386102).toFixed(1)} mi²` : `${km2} km²`;
+const lenUnit = () => imperial() ? "ft" : "m";
+/* Inputs with data-unit="len" (metres) or "dist" (km) show the preferred unit; data-metric keeps the metric value. */
+const UNIT_F = { len: () => imperial() ? M_FT : 1, dist: () => imperial() ? KM_MI : 1 };
+function setUnitVal(el, metric) {
+  const has = metric != null && metric !== "";
+  el.dataset.metric = has ? metric : "";
+  el.value = has ? +(metric * UNIT_F[el.dataset.unit]()).toFixed(2) : "";
+}
+const unitVal = el => el.value === "" ? null : +el.value / UNIT_F[el.dataset.unit]();
+document.addEventListener("input", e => {
+  const el = e.target;
+  if (el.dataset && el.dataset.unit) el.dataset.metric = el.value === "" ? "" : unitVal(el);
+});
+function updateRangeLabels() {
+  $("#reachRadiusVal").textContent = fmtDist(+$("#reachRadius").value);
+  $("#heatRadiusVal").textContent = fmtDist(+$("#heatRadius").value, 0);
+}
+const SCALES = [];
+function placeScale(s) { s.c?.remove(); s.c = L.control.scale({ metric: !imperial(), imperial: imperial() }).addTo(s.map); }
+function addScale(map) { const s = { map, c: null }; SCALES.push(s); placeScale(s); }
+
+const sysLight = matchMedia("(prefers-color-scheme: light)");
+function applyTheme() {
+  const light = UI.theme === "day" || (UI.theme === "system" && sysLight.matches);
+  document.documentElement.dataset.theme = light ? "light" : "dark";
+}
+sysLight.addEventListener("change", () => { applyTheme(); if (S.snap) renderAll(); });
+
+/** apply {theme, units} from the saved settings; returns true if anything changed */
+function applyUiSettings(ui) {
+  const theme = ui?.theme || "system", units = ui?.units || "metric";
+  const changed = theme !== UI.theme || units !== UI.units, unitsChanged = units !== UI.units;
+  UI.theme = theme; UI.units = units;
+  applyTheme();
+  document.querySelectorAll(".seg[data-setting] button").forEach(b => b.classList.toggle("on", b.dataset.v === UI[b.closest(".seg").dataset.setting]));
+  if (unitsChanged) {
+    document.querySelectorAll(".u-len").forEach(e => { e.textContent = lenUnit(); });
+    document.querySelectorAll(".u-dist").forEach(e => { e.textContent = imperial() ? "mi" : "km"; });
+    document.querySelectorAll("input[data-unit]").forEach(el => setUnitVal(el, el.dataset.metric === "" || el.dataset.metric == null ? null : +el.dataset.metric));
+    updateRangeLabels();
+    SCALES.forEach(placeScale);
+  }
+  return changed;
+}
+function toggleSettings(open) {
+  const p = $("#settingsPop"), o = open ?? p.hidden;
+  p.hidden = !o;
+  $("#settingsBtn").setAttribute("aria-expanded", String(o));
+}
+$("#settingsBtn").addEventListener("click", e => { e.stopPropagation(); toggleSettings(); });
+document.addEventListener("click", e => { if (!$("#settingsPop").hidden && !e.target.closest("#settingsPop, #settingsBtn")) toggleSettings(false); });
+document.addEventListener("keydown", e => { if (e.key === "Escape" && !$("#settingsPop").hidden) toggleSettings(false); });
+$("#settingsPop").addEventListener("click", async e => {
+  const b = e.target.closest(".seg button");
+  if (!b) return;
+  const key = b.closest(".seg").dataset.setting, prev = { ...UI };
+  if (UI[key] === b.dataset.v) return;
+  applyUiSettings({ ...UI, [key]: b.dataset.v });
+  if (S.snap) renderAll();
+  try {
+    await api("/api/ui-settings", { [key]: b.dataset.v });
+  } catch (err) {
+    applyUiSettings(prev);
+    if (S.snap) renderAll();
+    toast("Couldn't save the setting: " + err.message);
+  }
+});
+
 /* ---------------------------------------------------------------- polling */
 async function poll() {
   try {
@@ -133,16 +214,26 @@ async function poll() {
       S.snap = d;
       S.version = d.version;
       S.byNum = new Map(d.nodes.map(n => [n.num, n]));
+      applyUiSettings(d.settings?.ui);
       renderAll();
       if (!S.booted) {
         S.booted = true;
         const [t, sub] = decodeURIComponent(location.hash.slice(1)).split("/");
         if (t && $("#view-" + t)) { VIEWS[t]?.deep?.(sub); setTab(t); }
+        if (t === "settings" || sub === "settings") toggleSettings(true);
       }
     }
   } catch (e) {
-    $("#statusPill").textContent = "App offline";
-    $("#statusPill").className = "pill error";
+    if (e instanceof TypeError && /fetch/i.test(e.message)) {
+      $("#statusPill").textContent = "App offline";
+      $("#statusPill").className = "pill error";
+    } else {
+      // a rendering bug, not a lost server: show it instead of pretending the app is offline
+      console.error(e);
+      window.__errs?.push(`render: ${e.message} ${(e.stack || "").split("\n")[1]?.trim() || ""}`);
+      const d = $("#jsErrors");
+      if (d && window.__errs) { d.textContent = __errs.slice(-5).join("\n"); d.hidden = false; }
+    }
   }
   setTimeout(poll, 1500);
 }
@@ -329,7 +420,7 @@ function renderNodes() {
       <td class="num">${n.isLocal ? "–" : (n.hopsAway ?? "?")}</td>
       <td class="num" style="color:${n.isLocal ? "" : snrColor(n.hopsAway === 0 ? n.snr : null)}">${n.isLocal || n.hopsAway !== 0 ? "–" : fmtSnr(n.snr)}</td>
       <td>${n.isLocal ? "now" : ago(n.lastHeard)}</td>
-      <td class="num">${n.dist == null ? "–" : n.dist.toFixed(1) + " km"}</td>
+      <td class="num">${fmtDist(n.dist)}</td>
       <td class="num">${n.battery == null ? "–" : n.battery > 100 ? "powered" : n.battery + "%"}</td>
       <td class="muted">${esc(n.hwModel || "")}</td>
       <td class="muted">${esc(n.role || "")}</td>
@@ -376,8 +467,8 @@ function renderDrawer() {
     ["SNR / RSSI", n.hopsAway === 0 && !n.isLocal ? `${fmtSnr(n.snr)}${n.rssi != null ? ` / ${n.rssi} dBm` : ""}` : null],
     ["Last heard", n.isLocal ? "now" : ago(n.lastHeard)],
     ["Heard via MQTT", n.lastHeardMqtt ? ago(n.lastHeardMqtt) : null],
-    ["Position", hasPos(n) ? `${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}${n.alt != null ? ` · ${n.alt} m` : ""}` : "unknown"],
-    ["Distance", dist == null ? null : `${dist.toFixed(2)} km from this radio`],
+    ["Position", hasPos(n) ? `${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}${n.alt != null ? ` · ${fmtLen(n.alt)}` : ""}` : "unknown"],
+    ["Distance", dist == null ? null : `${fmtDist(dist, 2)} from this radio`],
     ["Battery", n.battery == null ? null : n.battery > 100 ? `external power${n.voltage ? ` (${n.voltage.toFixed(2)} V)` : ""}` : `${n.battery}%${n.voltage ? ` (${n.voltage.toFixed(2)} V)` : ""}`],
     ["Channel util", n.chUtil == null ? null : `${n.chUtil.toFixed(1)}%`],
     ["Air util TX", n.airUtilTx == null ? null : `${n.airUtilTx.toFixed(2)}%`],
@@ -391,20 +482,22 @@ function renderDrawer() {
     ${n.isLocal ? "" : `<label>Hop limit
       <select id="drawerHops">${[1, 2, 3, 4, 5, 6, 7].map(h => `<option ${h === (+prevHops || S.snap.hopLimit) ? "selected" : ""}>${h}</option>`).join("")}</select></label>`}
     ${n.isLocal ? `<div class="actions"><button class="wide" data-reach="${n.num}">Show reach</button></div>` : actionButtons(n.num, false)}
-    <label class="field ant">Antenna height above ground (m), used by the coverage heatmap
-      <input type="number" id="drawerAnt" min="0.1" max="500" step="0.5" placeholder="${defH} (default)" value="${n.antennaHeight ?? ""}"></label>
+    <label class="field ant">Antenna height above ground (${lenUnit()}), used by the coverage heatmap
+      <input type="number" id="drawerAnt" data-unit="len" min="0.1" step="0.5" placeholder="${fmtLen(defH)} (default)"></label>
     <section><h3>Radio links (${links.length})</h3>
       ${links.length ? links.map(l => `<div class="nb" data-select="${l.other}">
         <span>${esc(nodeName(l.other))}</span>
-        <span style="color:${snrColor(l.snr)}">${fmtSnr(l.snr)}${l.e.distanceKm != null ? ` · ${l.e.distanceKm.toFixed(1)} km` : ""}</span></div>`).join("")
+        <span style="color:${snrColor(l.snr)}">${fmtSnr(l.snr)}${l.e.distanceKm != null ? ` · ${fmtDist(l.e.distanceKm)}` : ""}</span></div>`).join("")
         : `<p class="muted small">No direct links observed yet. Run a traceroute, or wait for NeighborInfo broadcasts.</p>`}
     </section>
     ${jobs.length ? `<section><h3>Recent requests</h3>${jobs.map(jobHtml).join("")}</section>` : ""}
     ${n.isLocal ? "" : `<section><button class="danger" id="forgetBtn">${S.forgetArmed === n.num ? "Click again to forget this node" : "Forget this node"}</button></section>`}`;
+  setUnitVal($("#drawerAnt"), n.antennaHeight);
   $("#drawerAnt").onchange = async e => {
+    const h = unitVal(e.target);
     try {
-      await api("/api/node-settings", { node: n.num, antennaHeight: e.target.value });
-      toast(e.target.value ? `Antenna height set to ${e.target.value} m` : "Antenna height reset to default", true);
+      await api("/api/node-settings", { node: n.num, antennaHeight: h ?? "" });
+      toast(h != null ? `Antenna height set to ${fmtLen(h)}` : "Antenna height reset to default", true);
     } catch (err) { toast(err.message); }
   };
   const f = $("#forgetBtn");
@@ -438,7 +531,7 @@ function ensureMap() {
   M.map = L.map("map", { preferCanvas: true, zoomControl: true }).setView([20, 0], 2);
   layers["Street"].addTo(M.map);
   L.control.layers(layers).addTo(M.map);
-  L.control.scale({ imperial: true }).addTo(M.map);
+  addScale(M.map);
   M.edges = L.layerGroup().addTo(M.map);
   M.map.on("click", () => { if (B.popup && M.map.hasLayer(B.popup)) M.map.closePopup(B.popup); });
   VIEWS.live?.mapReady?.(M.map);
@@ -471,7 +564,7 @@ function bubbleHtml(n) {
     ["Heard", n.isLocal ? "now" : ago(n.lastHeard)],
     ["SNR", !n.isLocal && n.hopsAway === 0 ? fmtSnr(n.snr) : null],
     ["Battery", n.battery == null ? null : n.battery > 100 ? "powered" : n.battery + "%"],
-    ["Distance", dist == null ? null : dist.toFixed(2) + " km"],
+    ["Distance", dist == null ? null : fmtDist(dist, 2)],
     ["Role", n.role],
     ["Links", S.snap.edges.filter(e => e.a === n.num || e.b === n.num).length],
   ].filter(([, v]) => v != null && v !== "");
@@ -555,7 +648,7 @@ function renderMap() {
         color: snrColor(snr), weight: 2 + Math.min(3, Math.log2(1 + e.count) / 2), opacity: .75,
         dashArray: e.sources.every(s => s === "relay") ? "4 6" : null,
       }).bindTooltip(`${esc(nodeName(e.a))} ⇄ ${esc(nodeName(e.b))}<br>SNR ${fmtSnr(e.snrAB)} / ${fmtSnr(e.snrBA)}`
-        + `${e.distanceKm != null ? `<br>${e.distanceKm.toFixed(2)} km` : ""}<br>seen ${ago(e.lastSeen)} via ${esc(e.sources.join(", "))}`, { sticky: true })
+        + `${e.distanceKm != null ? `<br>${fmtDist(e.distanceKm, 2)}` : ""}<br>seen ${ago(e.lastSeen)} via ${esc(e.sources.join(", "))}`, { sticky: true })
         .addTo(M.edges);
     }
   }
@@ -747,7 +840,7 @@ function ensureReachMap() {
   R.map = L.map("reachMap", { preferCanvas: true }).setView([20, 0], 2);
   layers["Topographic"].addTo(R.map);
   L.control.layers(layers).addTo(R.map);
-  L.control.scale({ imperial: true }).addTo(R.map);
+  addScale(R.map);
   R.map.createPane("heat").style.zIndex = 350; // under the reach circles/markers
   R.layer = L.layerGroup().addTo(R.map);
 }
@@ -847,7 +940,7 @@ function drawReach(q) {
   $("#reachStats").innerHTML = `
     <div class="stat-grid">
       <div class="stat"><div class="v">${r.reachable}</div><div class="k">nodes reached</div></div>
-      <div class="stat"><div class="v">${r.farthest ? r.farthest.distanceKm.toFixed(1) + " km" : "–"}</div><div class="k">farthest${r.farthest ? `: ${esc(r.farthest.name)}` : ""}</div></div>
+      <div class="stat"><div class="v">${r.farthest ? fmtDist(r.farthest.distanceKm) : "–"}</div><div class="k">farthest${r.farthest ? `: ${esc(r.farthest.name)}` : ""}</div></div>
       <div class="stat"><div class="v">${r.beyond.length}</div><div class="k">just out of reach</div></div>
       <div class="stat"><div class="v">${Math.max(0, S.snap.nodes.length - 1 - r.reachable)}</div><div class="k">not reached</div></div>
     </div>
@@ -859,7 +952,7 @@ function drawReach(q) {
     + `<div><i style="--c:transparent;border:2px dashed #cbd5e1;width:12px;height:12px"></i>past limit</div><div><i style="--c:#334155"></i>not reached</div>`;
 }
 $("#reachHops").addEventListener("input", () => { $("#reachHopsVal").textContent = $("#reachHops").value; scheduleReach(150); });
-$("#reachRadius").addEventListener("input", () => { $("#reachRadiusVal").textContent = $("#reachRadius").value; if (S.reach) drawReach(S.reachQ); });
+$("#reachRadius").addEventListener("input", () => { updateRangeLabels(); if (S.reach) drawReach(S.reachQ); });
 ["#reachOrigin", "#reachBidir", "#reachAge", "#reachCircles"].forEach(s => $(s).addEventListener("input", () => {
   if (s === "#reachOrigin") S.reachOrigin = +$(s).value;
   scheduleReach(0);
@@ -874,7 +967,7 @@ function heatNodes() {
   else nums = S.snap.nodes.filter(n => n.favorite).map(n => n.num);
   return nums.filter(num => hasPos(S.byNum.get(num)));
 }
-$("#heatRadius").addEventListener("input", () => { $("#heatRadiusVal").textContent = $("#heatRadius").value; });
+$("#heatRadius").addEventListener("input", updateRangeLabels);
 $("#heatRun").onclick = async () => {
   const nodes = heatNodes();
   if (!nodes.length) { toast("None of those nodes has a known position"); return; }
@@ -887,13 +980,13 @@ $("#heatRun").onclick = async () => {
     const gain = +$("#heatGain").value;
     const r = await api("/api/coverage", { nodes, params: {
       radiusKm: +$("#heatRadius").value, preset: $("#heatPreset").value, txPower: +$("#heatPower").value,
-      txGain: gain, rxGain: gain, environment: $("#heatEnv").value, rxHeight: +$("#heatRxH").value,
+      txGain: gain, rxGain: gain, environment: $("#heatEnv").value, rxHeight: unitVal($("#heatRxH")) ?? 1.5,
     } });
     if (R.heat) R.heat.remove();
     R.heat = L.imageOverlay(r.image, r.bounds, { opacity: .85, interactive: false, pane: "heat" }).addTo(R.map);
     $("#heatLegend").hidden = false;
-    $("#heatInfo").innerHTML = `<b>${r.areaKm2} km²</b> predicted coverage · ${r.seconds}s · elevation zoom ${r.zoom} (${r.stepM} m steps)<br>`
-      + r.transmitters.map(t => `${esc(nodeName(t.num))}: ground ${t.groundM} m, antenna ${t.antennaM} m, mean reach ${t.meanReachKm} km`).join("<br>");
+    $("#heatInfo").innerHTML = `<b>${fmtArea(r.areaKm2)}</b> predicted coverage · ${r.seconds}s · elevation zoom ${r.zoom} (${fmtLen(r.stepM)} steps)<br>`
+      + r.transmitters.map(t => `${esc(nodeName(t.num))}: ground ${fmtLen(t.groundM)}, antenna ${fmtLen(t.antennaM)}, mean reach ${fmtDist(t.meanReachKm)}`).join("<br>");
     if (nodes.length === 1 && hasPos(S.byNum.get(nodes[0]))) R.map.fitBounds(r.bounds, { padding: [20, 20] });
   } catch (e) {
     $("#heatInfo").textContent = "Failed: " + e.message;

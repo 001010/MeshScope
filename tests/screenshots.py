@@ -1,11 +1,10 @@
-"""Start the app in demo mode, then capture every tab with headless Edge and fail on UI script errors.
+"""Start the app in demo mode, then capture every tab (Night and Day themes) with headless Edge driven over
+the DevTools protocol, and fail on any uncaught script error, console error or message in the UI error panel.
 
     .venv\\Scripts\\python tests\\screenshots.py [output-dir]
 """
 
 import json
-import re
-import subprocess
 import sys
 import tempfile
 import time
@@ -13,11 +12,15 @@ import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from meshscope.app import find_edge  # noqa: E402
 from meshscope.paths import static_dir  # noqa: E402
 from meshscope.server import App, start_server  # noqa: E402
 from meshscope.state import MeshState  # noqa: E402
+from cdp import HeadlessEdge  # noqa: E402
+
+READY = "typeof S !== 'undefined' && S.booted"
 
 TABS = ("nodes", "mynodes", "messages", "map", "topology", "reach", "activity", "config", "console", "addons", "mqtt")
 
@@ -56,18 +59,29 @@ time.sleep(20)
 
 edge = find_edge()
 errors = {}
-for tab in TABS:
-    url = f"{base}/?t={app.token}#{tab}"
-    common = [edge, "--headless=new", "--disable-gpu", "--hide-scrollbars", f"--user-data-dir={tmp / 'edge'}",
-              "--window-size=1440,900", "--virtual-time-budget=9000"]
-    png = out / f"{tab}.png"
-    subprocess.run(common + [f"--screenshot={png}", url], timeout=90, capture_output=True)
-    dom = subprocess.run(common + ["--dump-dom", url], timeout=90, capture_output=True, text=True, encoding="utf-8").stdout
-    m = re.search(r'<pre id="jsErrors"[^>]*>(.*?)</pre>', dom, re.S)
-    errs = m.group(1).strip() if m else "(page did not render)"
-    if errs:
-        errors[tab] = errs
-    print(f"{tab:9} {png} {'OK' if not errs else 'ERRORS: ' + errs}")
+with HeadlessEdge(edge) as page:
+    # the detector itself must work, or a broken page would pass silently
+    page.goto(f"{base}/?t={app.token}#nodes", READY)
+    page.eval("setTimeout(() => { throw new Error('detector self-check') }, 0)")
+    page.pump(0.6)
+    if not any("detector self-check" in e for e in page.errors):
+        sys.exit("UI CHECK BROKEN: a deliberate script error was not detected")
+    page.errors.clear()
+    for theme in ("night", "day"):
+        call("/api/ui-settings", {"theme": theme})
+        for tab in TABS:
+            page.errors.clear()
+            ok = page.goto(f"{base}/?t={app.token}#{tab}", READY)
+            page.pump(2.5)  # let maps, graphs and polling settle
+            png = out / f"{tab}-{theme}.png"
+            page.screenshot(png)
+            panel = page.eval("(document.getElementById('jsErrors') || {}).textContent || ''") or ""
+            errs = list(page.errors) + ([f"error panel: {panel.strip()}"] if panel.strip() else [])
+            if not ok:
+                errs.append("page did not finish loading")
+            if errs:
+                errors[f"{tab}/{theme}"] = errs
+            print(f"{tab:9} {theme:5} {png} {'OK' if not errs else 'ERRORS: ' + ' | '.join(errs)}")
 srv.shutdown()
 if errors:
     sys.exit("UI errors found")

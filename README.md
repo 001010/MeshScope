@@ -72,7 +72,7 @@ To run it without building:
 .venv\Scripts\python -m meshscope --no-window # prints the URL instead
 ```
 
-`tests\screenshots.py <dir>` takes a headless-Edge screenshot of every tab in demo mode and fails on any UI script error.
+`tests\screenshots.py <dir>` drives headless Edge over the DevTools protocol (`tests\cdp.py`, no extra packages), screenshots every tab in demo mode in both Night and Day themes, and fails on any uncaught script error, console error or message in the UI error panel.
 `tests\live_test.py COM9` and `tests\live_config_check.py COM9` check a real radio read-only. `tests\terrain_check.py` checks the coverage model (needs internet).
 
 ### Publishing an installer

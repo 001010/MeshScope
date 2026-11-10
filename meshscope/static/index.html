@@ -249,7 +249,7 @@ document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: ligh
                 <option value="dense_urban">Dense urban</option>
               </select>
             </label>
-            <label class="field">Receiver height (<span class="u-len">m</span>)<input type="number" id="heatRxH" data-unit="len" data-metric="1.5" value="1.5" min="0.1" step="0.5"></label>
+            <label class="field"><span>Receiver height (<span class="u-len">m</span>)</span><input type="number" id="heatRxH" data-unit="len" data-metric="1.5" value="1.5" min="0.1" step="0.5"></label>
           </div>
           <label class="chk"><input type="checkbox" id="heatLinks" checked> Calibrate with observed links</label>
           <p class="muted small" style="margin-top:-6px">Shifts each node's prediction to match the SNR its neighbours actually measured,
@@ -408,7 +408,7 @@ document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: ligh
         </fieldset>
         <fieldset>
           <legend>Filtering & keys</legend>
-          <label class="field">Only keep nodes within (<span class="u-dist">km</span> of your radio, 0 = no limit)<input id="mqDist" type="number" min="0" data-unit="dist"></label>
+          <label class="field"><span>Only keep nodes within (<span class="u-dist">km</span> of your radio, 0 = no limit)</span><input id="mqDist" type="number" min="0" data-unit="dist"></label>
           <label class="chk"><input type="checkbox" id="mqStrict"> Also drop nodes whose position is unknown</label>
           <label class="field"><span>Extra channel keys (<code>ChannelName=base64key</code>, one per line)</span>
             <textarea id="mqKeys" rows="3" spellcheck="false" placeholder="azmsh=AQ=="></textarea></label>

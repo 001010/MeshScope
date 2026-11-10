@@ -132,11 +132,11 @@ const KM_MI = 0.621371, M_FT = 3.28084;
 /** km -> "1.2 km" / "0.7 mi"; very short distances in m / ft */
 function fmtDist(km, d = 1) {
   if (km == null) return "–";
-  if (imperial()) { const mi = km * KM_MI; return mi < 0.1 ? `${Math.round(km * 1000 * M_FT)} ft` : `${mi.toFixed(d)} mi`; }
+  if (imperial()) { const mi = km * KM_MI; return mi < 0.1 ? `${Math.round(km * 1000 * M_FT).toLocaleString()} ft` : `${mi.toFixed(d)} mi`; }
   return km < 0.1 ? `${Math.round(km * 1000)} m` : `${km.toFixed(d)} km`;
 }
 /** heights / elevations, given in metres */
-const fmtLen = m => m == null ? "–" : imperial() ? `${Math.round(m * M_FT)} ft` : `${+(+m).toFixed(1)} m`;
+const fmtLen = m => m == null ? "–" : imperial() ? `${Math.round(m * M_FT).toLocaleString()} ft` : `${(+(+m).toFixed(1)).toLocaleString()} m`;
 const fmtArea = km2 => imperial() ? `${(km2 * 0.386102).toFixed(1)} mi²` : `${km2} km²`;
 const lenUnit = () => imperial() ? "ft" : "m";
 /* Inputs with data-unit="len" (metres) or "dist" (km) show the preferred unit; data-metric keeps the metric value. */
@@ -221,6 +221,10 @@ async function poll() {
         const [t, sub] = decodeURIComponent(location.hash.slice(1)).split("/");
         if (t && $("#view-" + t)) { VIEWS[t]?.deep?.(sub); setTab(t); }
         if (t === "settings" || sub === "settings") toggleSettings(true);
+        // #<tab>/!xxxxxxxx opens that node's details; #reach/heat opens and runs the heatmap
+        const nodeNum = /^![0-9a-f]{8}$/i.test(sub || "") ? parseInt(sub.slice(1), 16) : null;
+        if (nodeNum != null && S.byNum.has(nodeNum)) { S.selected = nodeNum; renderDrawer(); }
+        if (t === "reach" && sub === "heat") { $("#heatPanel").open = true; setTimeout(() => $("#heatRun").click(), 1500); }
       }
     }
   } catch (e) {
@@ -467,7 +471,10 @@ function renderDrawer() {
     ["SNR / RSSI", n.hopsAway === 0 && !n.isLocal ? `${fmtSnr(n.snr)}${n.rssi != null ? ` / ${n.rssi} dBm` : ""}` : null],
     ["Last heard", n.isLocal ? "now" : ago(n.lastHeard)],
     ["Heard via MQTT", n.lastHeardMqtt ? ago(n.lastHeardMqtt) : null],
-    ["Position", hasPos(n) ? `${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}${n.alt != null ? ` · ${fmtLen(n.alt)}` : ""}` : "unknown"],
+    ["Position", hasPos(n) ? `${n.lat.toFixed(5)}, ${n.lon.toFixed(5)}` : "unknown"],
+    ["Position precision", n.posErrM ? `about ±${fmtDist(n.posErrM / 1000)} (reduced by its owner for privacy)` : null],
+    ["Elevation", n.elevation ? `${fmtLen(n.elevation.m)} above sea level, median of ${n.elevation.reports} report${n.elevation.reports === 1 ? "" : "s"}`
+      + (n.elevation.reports > 1 ? ` (spread ${fmtLen(n.elevation.spread)})` : "") : n.alt != null && n.alt !== 0 ? `${fmtLen(n.alt)} above sea level` : null],
     ["Distance", dist == null ? null : `${fmtDist(dist, 2)} from this radio`],
     ["Battery", n.battery == null ? null : n.battery > 100 ? `external power${n.voltage ? ` (${n.voltage.toFixed(2)} V)` : ""}` : `${n.battery}%${n.voltage ? ` (${n.voltage.toFixed(2)} V)` : ""}`],
     ["Channel util", n.chUtil == null ? null : `${n.chUtil.toFixed(1)}%`],
@@ -482,8 +489,9 @@ function renderDrawer() {
     ${n.isLocal ? "" : `<label>Hop limit
       <select id="drawerHops">${[1, 2, 3, 4, 5, 6, 7].map(h => `<option ${h === (+prevHops || S.snap.hopLimit) ? "selected" : ""}>${h}</option>`).join("")}</select></label>`}
     ${n.isLocal ? `<div class="actions"><button class="wide" data-reach="${n.num}">Show reach</button></div>` : actionButtons(n.num, false)}
-    <label class="field ant">Antenna height above ground (${lenUnit()}), used by the coverage heatmap
-      <input type="number" id="drawerAnt" data-unit="len" min="0.1" step="0.5" placeholder="${fmtLen(defH)} (default)"></label>
+    <label class="field ant">Antenna height above ground (${lenUnit()}), used by the coverage heatmap.
+      ${n.elevation ? "Leave empty to work it out from the altitude this node reports." : `Leave empty for the default (${fmtLen(defH)}).`}
+      <input type="number" id="drawerAnt" data-unit="len" min="0.1" step="0.5" placeholder="${n.elevation ? "auto, from reported altitude" : `${fmtLen(defH)} (default)`}"></label>
     <section><h3>Radio links (${links.length})</h3>
       ${links.length ? links.map(l => `<div class="nb" data-select="${l.other}">
         <span>${esc(nodeName(l.other))}</span>
@@ -968,6 +976,18 @@ function heatNodes() {
   return nums.filter(num => hasPos(S.byNum.get(num)));
 }
 $("#heatRadius").addEventListener("input", updateRangeLabels);
+const ANT_SRC = { set: "set in its details panel", reported: "from its reported altitude", default: "default" };
+function heatTxHtml(t) {
+  const c = t.calibration;
+  const cal = !c ? "" : c.links ? `calibrated ${c.db > 0 ? "+" : ""}${c.db} dB from ${c.links} observed link${c.links === 1 ? "" : "s"}`
+    + (c.measured ? ` (${c.measured} with measured SNR)` : " (no measured SNR, so only checked that they're covered)")
+    : "no observed links with known positions to calibrate against";
+  return `<div class="heat-tx"><b>${esc(nodeName(t.num))}</b>: ground ${fmtLen(t.groundM)}`
+    + `${t.elevationM != null ? `, reports ${fmtLen(t.elevationM)} above sea level` : ""}`
+    + ` → antenna ${fmtLen(t.antennaM)} above ground (${ANT_SRC[t.antennaSrc] || t.antennaSrc})`
+    + `${t.antennaNote ? ` <span class="warn">${esc(t.antennaNote)}</span>` : ""}`
+    + `<br>mean reach ${fmtDist(t.meanReachKm)}${cal ? ` · ${cal}` : ""}</div>`;
+}
 $("#heatRun").onclick = async () => {
   const nodes = heatNodes();
   if (!nodes.length) { toast("None of those nodes has a known position"); return; }
@@ -981,12 +1001,14 @@ $("#heatRun").onclick = async () => {
     const r = await api("/api/coverage", { nodes, params: {
       radiusKm: +$("#heatRadius").value, preset: $("#heatPreset").value, txPower: +$("#heatPower").value,
       txGain: gain, rxGain: gain, environment: $("#heatEnv").value, rxHeight: unitVal($("#heatRxH")) ?? 1.5,
+      useLinks: $("#heatLinks").checked,
     } });
     if (R.heat) R.heat.remove();
     R.heat = L.imageOverlay(r.image, r.bounds, { opacity: .85, interactive: false, pane: "heat" }).addTo(R.map);
     $("#heatLegend").hidden = false;
-    $("#heatInfo").innerHTML = `<b>${fmtArea(r.areaKm2)}</b> predicted coverage · ${r.seconds}s · elevation zoom ${r.zoom} (${fmtLen(r.stepM)} steps)<br>`
-      + r.transmitters.map(t => `${esc(nodeName(t.num))}: ground ${fmtLen(t.groundM)}, antenna ${fmtLen(t.antennaM)}, mean reach ${fmtDist(t.meanReachKm)}`).join("<br>");
+    $("#heatInfo").innerHTML = `<b>${fmtArea(r.areaKm2)}</b> predicted coverage · ${r.seconds}s · elevation zoom ${r.zoom} (${fmtLen(r.stepM)} steps)`
+      + (r.radiusExtended ? `<br>Radius widened to ${fmtDist(r.radiusKm)} to include the farthest observed link.` : "")
+      + r.transmitters.map(heatTxHtml).join("");
     if (nodes.length === 1 && hasPos(S.byNum.get(nodes[0]))) R.map.fitBounds(r.bounds, { padding: [20, 20] });
   } catch (e) {
     $("#heatInfo").textContent = "Failed: " + e.message;

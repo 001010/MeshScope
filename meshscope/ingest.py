@@ -274,8 +274,8 @@ class PacketProcessor:
         if lat is None and pos.get("latitudeI") is not None:
             lat, lon = pos["latitudeI"] * 1e-7, pos.get("longitudeI", 0) * 1e-7
         if lat is not None and lon is not None and not (abs(lat) < 1e-6 and abs(lon) < 1e-6):
-            self.state.merge_node(p["from"], lat=lat, lon=lon, alt=pos.get("altitude"),
-                                  positionTime=pos.get("time") or time.time())
+            self.state.record_position(p["from"], lat, lon, pos.get("altitude"), pos.get("precisionBits"))
+            self.state.merge_node(p["from"], positionTime=pos.get("time") or time.time())
 
     def _handle_nodeinfo(self, p, decoded):
         u = decoded.get("user") or {}

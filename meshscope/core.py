@@ -258,15 +258,16 @@ class App:
         if self._coverage is None:
             self._coverage = CoverageEngine(self.workdir / "terrain-cache")
         st = self.state
-        default_h = float(st.settings.get("defaultAntennaHeight", 2.0))
+        params = dict(body.get("params", {}))
+        params.setdefault("defaultHeight", float(st.settings.get("defaultAntennaHeight", 2.0)))
         txs = []
         for num in body.get("nodes", []):
-            n = st.nodes.get(int(num))
-            if n and n.get("lat") is not None:
-                txs.append({"num": n["num"], "lat": n["lat"], "lon": n["lon"],
-                            "height": float(n.get("antennaHeight") or default_h)})
+            t = st.coverage_inputs(int(num))
+            if t:
+                t["height"] = float(t["antennaHeight"]) if t.get("antennaHeight") else None
+                txs.append(t)
         if not txs:
             raise ValueError("None of the selected nodes has a known position")
         if len(txs) > 40:
             txs = txs[:40]
-        return self._coverage.compute(txs, body.get("params", {}))
+        return self._coverage.compute(txs, params)

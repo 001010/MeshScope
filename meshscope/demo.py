@@ -96,6 +96,13 @@ class DemoRadio(Radio):
             nodes[num] = dict(lat=lat, lon=lon, range=r.uniform(14, 22) if role.startswith("ROUTER") else r.uniform(4, 11),
                               name=f"{nm} {r.choice(['Node', 'Relay', 'Base', 'Mobile', 'Hilltop'])}",
                               short=nm[:3].upper() + str(i % 10), hw=r.choice(HW), role=role, gps=r.random() > 0.12)
+        # antenna sites and privacy settings (separate RNG so the mesh layout above stays the same)
+        r2 = random.Random(1234)
+        for num, n in nodes.items():
+            tall = n["role"].startswith("ROUTER") or "Hilltop" in n["name"]
+            n["agl"] = round(r2.uniform(12, 35) if tall else r2.uniform(1, 3), 1)  # antenna height above ground
+            n["alt"] = round(1610 + n["agl"])  # rough Denver ground level + mast; real radios report GPS altitude
+            n["precision"] = 16 if num != self.local and r2.random() < 0.15 else 32  # ~+-364 m when reduced
         self.info = nodes
         adj = {n: {} for n in nodes}
         for a in nodes:
@@ -109,6 +116,15 @@ class DemoRadio(Radio):
                     adj[a][b] = snr
                     adj[b][a] = round(snr + r.gauss(0, 1), 2)
         self.truth = adj
+
+    def _pos_report(self, n):
+        """A position packet as the node would send it: GPS altitude jitters a few metres, and nodes with
+        reduced precision send coordinates snapped to the centre of their precision cell."""
+        lat, lon, bits = n["lat"], n["lon"], n["precision"]
+        if bits < 32:
+            cell = 2 ** (32 - bits) * 1e-7
+            lat, lon = (math.floor(lat / cell) + 0.5) * cell, (math.floor(lon / cell) + 0.5) * cell
+        return {"latitude": lat, "longitude": lon, "altitude": round(n["alt"] + self.rng.gauss(0, 3)), "precisionBits": bits}
 
     def _path(self, src, dst, limit=7):
         prev = {src: None}
@@ -145,7 +161,7 @@ class DemoRadio(Radio):
             st.merge_lib_node({
                 "num": num,
                 "user": {"longName": n["name"], "shortName": n["short"], "hwModel": n["hw"], "role": n["role"]},
-                "position": {"latitude": n["lat"], "longitude": n["lon"], "altitude": self.rng.randint(1550, 2400)} if n["gps"] else {},
+                "position": self._pos_report(n) if n["gps"] else {},
                 "lastHeard": now - self.rng.randint(30, 3600),
                 "hopsAway": max(0, len(path) - 2),  # relays between it and us
                 "snr": self.truth[num].get(self.local) if len(path) == 2 else None,
@@ -211,7 +227,7 @@ class DemoRadio(Radio):
                 self._deliver(src, BROADCAST_NUM, "NEIGHBORINFO_APP", ni.SerializeToString())
             elif roll < 0.3 and n["gps"]:
                 self._deliver(src, BROADCAST_NUM, "POSITION_APP",
-                              decoded_extra={"position": {"latitude": n["lat"], "longitude": n["lon"]}})
+                              decoded_extra={"position": self._pos_report(n)})
             elif roll < 0.36:
                 txt = r.choice(CHATTER)
                 sub = r.random()
@@ -269,7 +285,7 @@ class DemoRadio(Radio):
                           decoded_extra={"user": {"id": f"!{target:08x}", "longName": n["name"], "shortName": n["short"],
                                                   "hwModel": n["hw"], "role": n["role"]}})
         elif kind == "position":
-            pos = {"latitude": n["lat"], "longitude": n["lon"], "time": int(time.time())} if n["gps"] else {}
+            pos = dict(self._pos_report(n), time=int(time.time())) if n["gps"] else {}
             self._deliver(target, self.local, "POSITION_APP", request_id=pid, hop_start=hop_limit, path=back,
                           decoded_extra={"position": pos})
         elif kind == "telemetry":

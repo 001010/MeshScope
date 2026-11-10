@@ -224,8 +224,9 @@ document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: ligh
         <details class="heat" id="heatPanel">
           <summary><b>Terrain coverage heatmap</b></summary>
           <p class="muted small">Predicts signal strength from real elevation data (hills, ridges and valleys block or shadow the signal),
-            plus antenna height. Set a node's antenna height (rooftop, tower) in its details panel. Buildings and trees aren't in the elevation data,
-            so they're approximated by the <i>environment</i> loss. It's an estimate: compare it with the links you've observed.</p>
+            plus antenna height. A node's antenna height comes from its details panel if you set one there (rooftop, tower), otherwise from
+            the altitude it reports compared with the terrain under it. Buildings and trees aren't in the elevation data,
+            so they're approximated by the <i>environment</i> loss.</p>
           <label class="field">Transmitters
             <select id="heatScope">
               <option value="origin">Origin node only</option>
@@ -250,6 +251,9 @@ document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: ligh
             </label>
             <label class="field">Receiver height (<span class="u-len">m</span>)<input type="number" id="heatRxH" data-unit="len" data-metric="1.5" value="1.5" min="0.1" step="0.5"></label>
           </div>
+          <label class="chk"><input type="checkbox" id="heatLinks" checked> Calibrate with observed links</label>
+          <p class="muted small" style="margin-top:-6px">Shifts each node's prediction to match the SNR its neighbours actually measured,
+            and widens the radius to include its farthest observed link.</p>
           <label class="field">Radius: <b id="heatRadiusVal">15 km</b>
             <input type="range" id="heatRadius" min="2" max="60" value="15">
           </label>

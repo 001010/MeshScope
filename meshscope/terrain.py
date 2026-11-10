@@ -14,6 +14,16 @@ Terrain (hills, ridges, valleys) is modelled from real elevation. Buildings and 
 are not in the elevation data, so they are approximated by the "environment" clutter
 loss; tall sites (towers, rooftops, hilltop routers) are modelled with per-node antenna
 height above ground.
+
+Antenna height: a height set by hand wins; otherwise the median altitude the node has
+reported (GPS, metres above sea level) minus the terrain under it; otherwise a default.
+
+Calibration: each node's prediction is checked against the radio links actually observed
+from it. Where a neighbour measured the node's SNR, the observed margin (SNR minus the
+preset's demodulation limit) is compared with the predicted margin at the neighbour's
+position, and the node's whole map is shifted by the median difference. That absorbs real
+transmit power, antenna and cable losses, local clutter and the receivers' antennas. Links
+without a usable SNR only require the neighbour to be covered (margin >= 0).
 """
 
 from __future__ import annotations
@@ -22,6 +32,7 @@ import base64
 import io
 import logging
 import math
+import statistics
 import threading
 import time
 import urllib.request
@@ -38,16 +49,44 @@ K_FACTOR = 4.0 / 3.0
 
 # Approximate LoRa receive sensitivity per preset (dBm): -174 + 10log10(BW) + NF(6) + SNR limit
 PRESETS = {
-    "LONG_SLOW": {"label": "LongSlow (SF12/125k)", "sens": -137.0},
-    "LONG_MODERATE": {"label": "LongModerate (SF11/125k)", "sens": -134.5},
-    "LONG_FAST": {"label": "LongFast (SF11/250k)", "sens": -131.5},
-    "MEDIUM_SLOW": {"label": "MediumSlow (SF10/250k)", "sens": -129.0},
-    "MEDIUM_FAST": {"label": "MediumFast (SF9/250k)", "sens": -126.5},
-    "SHORT_SLOW": {"label": "ShortSlow (SF8/250k)", "sens": -124.0},
-    "SHORT_FAST": {"label": "ShortFast (SF7/250k)", "sens": -121.5},
-    "SHORT_TURBO": {"label": "ShortTurbo (SF7/500k)", "sens": -118.5},
+    "LONG_SLOW": {"label": "LongSlow (SF12/125k)", "sens": -137.0, "snrLimit": -20.0},
+    "LONG_MODERATE": {"label": "LongModerate (SF11/125k)", "sens": -134.5, "snrLimit": -17.5},
+    "LONG_FAST": {"label": "LongFast (SF11/250k)", "sens": -131.5, "snrLimit": -17.5},
+    "MEDIUM_SLOW": {"label": "MediumSlow (SF10/250k)", "sens": -129.0, "snrLimit": -15.0},
+    "MEDIUM_FAST": {"label": "MediumFast (SF9/250k)", "sens": -126.5, "snrLimit": -12.5},
+    "SHORT_SLOW": {"label": "ShortSlow (SF8/250k)", "sens": -124.0, "snrLimit": -10.0},
+    "SHORT_FAST": {"label": "ShortFast (SF7/250k)", "sens": -121.5, "snrLimit": -7.5},
+    "SHORT_TURBO": {"label": "ShortTurbo (SF7/500k)", "sens": -118.5, "snrLimit": -7.5},
 }
 ENVIRONMENTS = {"open": 0.0, "rural": 6.0, "suburban": 12.0, "urban": 20.0, "dense_urban": 28.0}
+MAX_AUTO_RADIUS_M = 80000.0   # radius is widened to include observed links, up to this
+SNR_SATURATION = 8.0          # LoRa SNR flattens out near +10 dB, so higher readings only bound the margin
+MAX_CALIBRATION_DB = 30.0
+MIN_AGL_M, MAX_AGL_M = 1.0, 300.0
+MAX_POS_ERR_FOR_ELEVATION_M = 150.0  # beyond this the terrain under the reported position is a guess
+
+
+def _dist_bearing(lat0, lon0, lat1, lon1):
+    dy = (lat1 - lat0) * 111320.0
+    dx = (lon1 - lon0) * 111320.0 * math.cos(math.radians(lat0))
+    return math.hypot(dx, dy), math.atan2(dx, dy) % (2 * math.pi)
+
+
+def antenna_height(t: Dict[str, Any], ground: float, default: float) -> Tuple[float, str, Optional[str]]:
+    """(height above ground, source, note) for a transmitter."""
+    if t.get("height") is not None:
+        return float(t["height"]), "set", None
+    el = t.get("elevation")
+    if not el:
+        return default, "default", None
+    if (t.get("posErrM") or 0) > MAX_POS_ERR_FOR_ELEVATION_M:
+        return default, "default", "position is imprecise, so its reported altitude can't be compared with the terrain"
+    agl = el["m"] - ground
+    if agl < MIN_AGL_M:
+        return default, "default", f"reported altitude is {-agl:.0f} m below the terrain model (GPS altitude error)" if agl < -5 else None
+    if agl > MAX_AGL_M:
+        return MAX_AGL_M, "reported", f"reported altitude is {agl:.0f} m above ground; capped at {MAX_AGL_M:.0f} m"
+    return agl, "reported", None
 
 
 class TileCache:
@@ -142,6 +181,10 @@ class CoverageEngine:
         self.cache = TileCache(cache_dir)
         self._lock = threading.Lock()
 
+    @staticmethod
+    def _calibrate(t, margin, rays, step, n, radius, snr_limit):
+        return _calibrate_impl(t, margin, rays, step, n, radius, snr_limit)
+
     def compute(self, txs: List[Dict[str, Any]], p: Dict[str, Any]) -> Dict[str, Any]:
         """txs: [{num, lat, lon, height}], p: radius_km, freq_mhz, tx_power, gains, preset, environment, rx_height."""
         if not txs:
@@ -151,11 +194,19 @@ class CoverageEngine:
 
     def _compute(self, txs, p):
         t0 = time.time()
-        radius = float(p.get("radiusKm", 15)) * 1000.0
+        radius_req = radius = float(p.get("radiusKm", 15)) * 1000.0
+        if p.get("useLinks", True):
+            # make sure the farthest observed link of every transmitter is on the map
+            far = [_dist_bearing(t["lat"], t["lon"], nb["lat"], nb["lon"])[0]
+                   for t in txs for nb in t.get("neighbors", ())]
+            if far:
+                radius = max(radius, min(MAX_AUTO_RADIUS_M, max(far) * 1.2))
+        default_h = float(p.get("defaultHeight", 2.0))
         freq = float(p.get("freqMhz", 906.875))
         lam = 299.792458 / freq
         eirp = float(p.get("txPower", 22)) + float(p.get("txGain", 2)) + float(p.get("rxGain", 2)) - float(p.get("cableLoss", 0))
-        sens = PRESETS.get(p.get("preset", "LONG_FAST"), PRESETS["LONG_FAST"])["sens"]
+        preset = PRESETS.get(p.get("preset", "LONG_FAST"), PRESETS["LONG_FAST"])
+        sens, snr_limit = preset["sens"], preset["snrLimit"]
         clutter = ENVIRONMENTS.get(p.get("environment", "suburban"), 12.0)
         rx_h = float(p.get("rxHeight", 1.5))
         rays = int(p.get("rays", 360 if len(txs) <= 3 else 180))
@@ -196,7 +247,8 @@ class CoverageEngine:
             r_lat, r_lon = _offset(t["lat"], t["lon"], d[None, :], bearings[:, None])
             terr = dem.sample(r_lat, r_lon)
             ground0 = float(dem.sample(np.array([t["lat"]]), np.array([t["lon"]]))[0])
-            tx_abs = ground0 + float(t.get("height") or 2.0)
+            height, h_src, h_note = antenna_height(t, ground0, default_h)
+            tx_abs = ground0 + height
             terr_eff = terr - d[None, :] ** 2 / (2 * K_FACTOR * EARTH_R)  # earth bulge
             margin = np.empty((rays, n), dtype=np.float32)
             # mean terrain between the transmitter and each point -> effective antenna height,
@@ -215,6 +267,9 @@ class CoverageEngine:
                 plane_earth = 40 * np.log10(d) - 20 * np.log10(ht_eff[k]) - 20 * np.log10(rx_h)
                 path = np.maximum(fspl, plane_earth)
                 margin[k] = eirp - path - diffraction - clutter_vec - sens
+            calib = self._calibrate(t, margin, rays, step, n, radius, snr_limit) if p.get("useLinks", True) else None
+            if calib and calib["db"]:
+                margin += calib["db"]
             # polar -> raster
             dy = (g_lat - t["lat"]) * 111320.0
             dx = (g_lon - t["lon"]) * 111320.0 * math.cos(math.radians(t["lat"]))
@@ -228,7 +283,9 @@ class CoverageEngine:
             # distance along each ray before coverage first drops out
             first_gap = np.where((~covered).any(axis=1), np.argmax(~covered, axis=1), n)
             reach_m = float(np.where(first_gap > 0, d[np.maximum(first_gap - 1, 0)], 0.0).mean())
-            per_tx.append({"num": t["num"], "groundM": round(ground0, 1), "antennaM": t.get("height"),
+            per_tx.append({"num": t["num"], "groundM": round(ground0, 1), "antennaM": round(height, 1),
+                           "antennaSrc": h_src, "antennaNote": h_note,
+                           "elevationM": (t.get("elevation") or {}).get("m"), "calibration": calib,
                            "meanReachKm": round(reach_m / 1000, 2),
                            "coveredPct": round(float(covered.mean()) * 100, 1)})
 
@@ -240,8 +297,37 @@ class CoverageEngine:
             "areaKm2": round(float((best > 0).sum()) * cell_km2, 1),
             "transmitters": per_tx,
             "zoom": dem.z, "tiles": dem.tiles, "stepM": round(step), "seconds": round(time.time() - t0, 2),
+            "radiusKm": round(radius / 1000, 1), "radiusExtended": radius > radius_req + 1,
             "sensitivity": sens, "eirp": eirp, "clutterDb": clutter,
         }
+
+
+def _calibrate_impl(t, margin, rays, step, n, radius, snr_limit):
+    exact, lower, skipped = [], [], 0
+    for nb in t.get("neighbors", ()):
+        dist, brg = _dist_bearing(t["lat"], t["lon"], nb["lat"], nb["lon"])
+        if dist < step or dist > radius:
+            skipped += 1
+            continue
+        if (t.get("posErrM") or 0) + (nb.get("posErrM") or 0) > 0.3 * dist:
+            skipped += 1  # positions too vague for a link this short
+            continue
+        ri = int(round(brg / (2 * math.pi) * rays)) % rays
+        di = min(max(int(round(dist / step)) - 1, 0), n - 1)
+        pred = float(margin[ri, di])
+        snr = nb.get("snr")
+        if nb.get("heard") and snr is not None and snr < SNR_SATURATION:
+            exact.append((snr - snr_limit) - pred)
+        else:
+            lower.append(max(0.0, -pred))  # the link exists, so the neighbour is at least just covered
+    if exact:
+        db = statistics.median(exact)
+    elif lower:
+        db = statistics.median(lower)
+    else:
+        return {"db": 0.0, "links": 0, "measured": 0, "skipped": skipped}
+    db = max(-MAX_CALIBRATION_DB, min(MAX_CALIBRATION_DB, db))
+    return {"db": round(db, 1), "links": len(exact) + len(lower), "measured": len(exact), "skipped": skipped}
 
 
 def _render(margin: np.ndarray) -> bytes:

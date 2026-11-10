@@ -292,7 +292,7 @@ table.nodes tr.selected { background: var(--sel-bg); }
 .drawer h2 { padding-right: 30px; }
 .kv { display: grid; grid-template-columns: 120px 1fr; gap: 3px 10px; margin: 10px 0; }
 .kv dt { color: var(--muted); }
-.kv dd { margin: 0; word-break: break-all; }
+.kv dd { margin: 0; overflow-wrap: anywhere; }
 .drawer .actions { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; margin: 10px 0; }
 .drawer .actions .wide { grid-column: span 2; }
 .drawer section { margin-top: 14px; }
@@ -506,3 +506,4 @@ legend { color: var(--text); font-weight: 600; padding: 0 6px; }
   background: var(--overlay); border: 1px solid var(--line); border-radius: 6px; padding: 4px 8px;
   font-size: 11px; line-height: 1.35; color: var(--muted);
 }
+.heat-tx { margin-top: 6px; }

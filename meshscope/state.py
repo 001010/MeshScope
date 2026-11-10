@@ -15,6 +15,7 @@ from __future__ import annotations
 import json
 import logging
 import math
+import statistics
 import threading
 import time
 from collections import deque
@@ -28,6 +29,17 @@ MAX_JOBS = 200
 MAX_LOG = 600
 MAX_MESSAGES = 2000
 DB_VERSION = 1
+MAX_POS_HISTORY = 60            # reported positions kept per node
+ALT_WINDOW_S = 30 * 86400       # altitude reports used for the elevation estimate
+ALT_NEAR_KM = 0.3               # ...and only those reported near the node's current position
+
+
+def precision_error_m(bits) -> Optional[float]:
+    """Approximate position error for Meshtastic's position precision (bits kept of the 32-bit coordinate).
+    32 (or unset) = full precision; e.g. 16 bits ~ +-364 m, 13 bits ~ +-2.9 km."""
+    if not bits or int(bits) >= 32:
+        return None
+    return 23905787.925 / (2 ** int(bits))
 
 DEFAULT_SETTINGS: Dict[str, Any] = {
     "mqtt": {
@@ -179,9 +191,6 @@ class MeshState:
             shortName=user.get("shortName"),
             hwModel=user.get("hwModel"),
             role=user.get("role", "CLIENT") if user else None,
-            lat=lat,
-            lon=lon,
-            alt=pos.get("altitude"),
             positionTime=pos.get("time"),
             lastHeard=d.get("lastHeard"),
             snr=d.get("snr"),
@@ -193,6 +202,73 @@ class MeshState:
             airUtilTx=dm.get("airUtilTx"),
             uptime=dm.get("uptimeSeconds"),
         )
+        if lat is not None and lon is not None:
+            self.record_position(num, lat, lon, pos.get("altitude"), pos.get("precisionBits"), ts=pos.get("time"))
+
+    def record_position(self, num: int, lat: float, lon: float, alt=None, precision_bits=None,
+                        ts: Optional[float] = None):
+        """Set a node's current position and keep a short history of what it reported (incl. altitude),
+        which the coverage model uses for the antenna's elevation."""
+        if num is None or num in (0, BROADCAST_NUM) or lat is None or lon is None:
+            return
+        now = time.time()
+        ts = float(ts) if ts and 0 < float(ts) <= now + 300 else now
+        alt = None if alt in (None, 0, 0.0) else round(float(alt), 1)  # 0 = firmware's "no altitude"
+        bits = int(precision_bits) if precision_bits else None
+        with self._lock:
+            n = self._node(num)
+            n["lat"], n["lon"] = lat, lon
+            if alt is not None:
+                n["alt"] = alt
+            if bits is not None:
+                n["precisionBits"] = bits
+            h = n.setdefault("posHistory", [])
+            last = h[-1] if h else None
+            same = last and abs(last[1] - lat) < 1e-6 and abs(last[2] - lon) < 1e-6 and last[3] == alt
+            if not same or ts - last[0] >= 900:  # identical reports are kept at most every 15 min
+                h.append([round(ts), round(lat, 7), round(lon, 7), alt, bits])
+                h.sort(key=lambda e: e[0])
+                del h[:-MAX_POS_HISTORY]
+            self._touch()
+
+    @staticmethod
+    def _elevation(n: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Median of the altitudes the node reported recently, near where it is now (metres above sea level)."""
+        if n.get("lat") is None:
+            return None
+        cutoff = time.time() - ALT_WINDOW_S
+        alts = [e[3] for e in n.get("posHistory", ()) if e[3] is not None and e[0] >= cutoff
+                and haversine_km(e[1], e[2], n["lat"], n["lon"]) <= ALT_NEAR_KM]
+        if not alts:
+            return None
+        return {"m": round(statistics.median(alts), 1), "reports": len(alts),
+                "spread": round(max(alts) - min(alts), 1)}
+
+    def coverage_inputs(self, num: int, max_link_age_s: float = 7 * 86400) -> Optional[Dict[str, Any]]:
+        """Position, reported elevation and observed radio links of a node, for the terrain coverage model."""
+        now = time.time()
+        with self._lock:
+            n = self.nodes.get(num)
+            if not n or n.get("lat") is None:
+                return None
+            nbs = {}
+            for l in self.links.values():
+                if now - l["lastSeen"] > max_link_age_s or num not in (l["tx"], l["rx"]):
+                    continue
+                other = l["rx"] if l["tx"] == num else l["tx"]
+                o = self.nodes.get(other)
+                if not o or o.get("lat") is None:
+                    continue
+                e = nbs.setdefault(other, {"num": other, "lat": o["lat"], "lon": o["lon"],
+                                           "posErrM": precision_error_m(o.get("precisionBits")),
+                                           "snr": None, "heard": False})
+                if l["tx"] == num:  # the neighbour heard this node: its SNR measures this node's signal
+                    e["heard"] = True
+                    if l.get("snr") is not None:
+                        e["snr"] = l["snr"]
+            return {"num": num, "lat": n["lat"], "lon": n["lon"], "antennaHeight": n.get("antennaHeight"),
+                    "elevation": self._elevation(n), "posErrM": precision_error_m(n.get("precisionBits")),
+                    "neighbors": list(nbs.values())}
 
     def forget_node(self, num: int):
         self.forget_nodes([num])
@@ -570,6 +646,10 @@ class MeshState:
             nodes = []
             for n in self.nodes.values():
                 c = dict(n)
+                c.pop("posHistory", None)  # can be long; the UI gets a summary
+                c["elevation"] = self._elevation(n)
+                c["positionReports"] = len(n.get("posHistory", ()))
+                c["posErrM"] = precision_error_m(n.get("precisionBits"))
                 c["isLocal"] = n["num"] == self.local_num
                 c["favorite"] = n["num"] in self.favorites
                 nodes.append(c)

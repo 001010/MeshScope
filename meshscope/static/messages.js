@@ -37,7 +37,7 @@ function buildThreads(snap) {
         : { kind: "dm", peer: +key.slice(3) });
     t.msgs.push(m);
     t.last = Math.max(t.last, m.t);
-    if (!m.outgoing && m.t > (MSG.read[key] || 0)) t.unread++;
+    if (!m.outgoing && !m.emoji && m.t > (MSG.read[key] || 0)) t.unread++;  // reactions aren't new messages
   }
   return T;
 }
@@ -61,7 +61,7 @@ SNAP_HOOKS.push(snap => {
   if (MSG.lastSeq == null || top < MSG.lastSeq) { MSG.lastSeq = top; return; }
   for (const m of snap.messages) {
     if (m.seq > MSG.lastSeq && m.dm && !m.outgoing && !(S.tab === "messages" && MSG.thread === threadOf(m))) {
-      toast(`💬 ${nodeName(m.from)}: ${m.text}`, true);
+      toast(m.emoji ? `${nodeName(m.from)} reacted ${m.text}` : `💬 ${nodeName(m.from)}: ${m.text}`, true);
     }
   }
   MSG.lastSeq = top;
@@ -78,13 +78,49 @@ const STATUS_TXT = {
   failed: ["✗", "not delivered"], noack: ["?", "no acknowledgement"],
 };
 
-function msgHtml(m, t) {
+/** Emoji reactions are folded into the message they react to (shown as chips under it, like Slack);
+ *  text replies stay in the thread with a muted quote of the message they answer. */
+function foldReplies(msgs) {
+  const byPid = new Map();
+  for (const m of S.snap.messages) if (m.packetId != null && !m.emoji) byPid.set(m.packetId, m);
+  const reacts = new Map(); // seq of the target message -> Map(emoji -> [node nums])
+  const shown = [];
+  for (const m of msgs) {
+    const target = m.emoji && m.replyId != null ? byPid.get(m.replyId) : null;
+    if (target && threadOf(target) === threadOf(m)) {
+      const r = reacts.get(target.seq) || new Map();
+      reacts.set(target.seq, r);
+      const who = r.get(m.text) || [];
+      if (!who.includes(m.from)) who.push(m.from);
+      r.set(m.text, who);
+    } else {
+      shown.push(m);
+    }
+  }
+  return { shown, reacts, byPid };
+}
+function quoteHtml(m, ctx) {
+  if (m.replyId == null) return "";
+  const q = ctx.byPid.get(m.replyId);
+  const verb = m.emoji ? "reacted to" : "replying to";
+  if (!q) return `<div class="quote">↪ ${verb} a message MeshScope didn't receive</div>`;
+  const who = q.outgoing ? "You" : nodeName(q.from);
+  return `<div class="quote" data-jump="${q.seq}" title="${esc(verb)} ${esc(who)}: ${esc(q.text)}">↪ <b>${esc(who)}</b> ${esc(q.text)}</div>`;
+}
+function reactsHtml(m, ctx) {
+  const r = ctx.reacts.get(m.seq);
+  if (!r) return "";
+  return `<div class="reacts">${[...r].map(([e, who]) => `<span class="react" title="${esc(who.map(nodeName).join(", "))}">${esc(e)}`
+    + `${who.length > 1 ? `<b>${who.length}</b>` : ""}</span>`).join("")}</div>`;
+}
+
+function msgHtml(m, t, ctx) {
   const when = new Date(m.t * 1000);
   const time = when.toDateString() === new Date().toDateString() ? when.toLocaleTimeString() : when.toLocaleString();
   if (m.outgoing) {
     const [ic, txt] = STATUS_TXT[m.status] || ["", m.status || ""];
     const err = m.status === "failed" && m.error ? `: ${m.error.replaceAll("_", " ").toLowerCase()}` : "";
-    return `<div class="msg out ${esc(m.status || "")}"><div class="body">${esc(m.text)}</div>
+    return `<div class="msg out ${esc(m.status || "")}" id="msg-${m.seq}">${quoteHtml(m, ctx)}<div class="body">${esc(m.text)}</div>${reactsHtml(m, ctx)}
       <div class="meta">${esc(time)}${m.src === "demo" ? " · demo (not transmitted)" : ""} · <span class="st" title="${esc(txt + err)}">${ic} ${esc(txt + err)}</span></div></div>`;
   }
   const n = S.byNum.get(m.from);
@@ -94,9 +130,9 @@ function msgHtml(m, t) {
   if (t.kind !== "dm" && m.to != null && m.to !== BCAST) bits.push(`to ${esc(nodeName(m.to))}`);
   const viaMqtt = m.src === "mqtt"
     ? `<span class="tag mqtt" title="Received only through the MQTT bridge, not over the air by your radio">via MQTT${m.gateway != null ? ` · gateway ${esc(shortOf(m.gateway))}` : ""}</span>` : "";
-  return `<div class="msg in"><div class="meta"><span class="short" style="--c:${hopColor(n)}">${esc(shortOf(m.from))}</span>
+  return `<div class="msg in${m.emoji ? " emoji" : ""}" id="msg-${m.seq}"><div class="meta"><span class="short" style="--c:${hopColor(n)}">${esc(shortOf(m.from))}</span>
       <b class="who" data-select="${m.from}">${esc(nodeName(m.from))}</b><span class="muted">${bits.join(" · ")}</span>${viaMqtt}</div>
-    <div class="body">${esc(m.text)}</div></div>`;
+    ${quoteHtml(m, ctx)}<div class="body">${esc(m.text)}</div>${reactsHtml(m, ctx)}</div>`;
 }
 
 function renderMessages(force) {
@@ -154,7 +190,8 @@ function renderMessages(force) {
     $("#msgHead").innerHTML = head;
     const box = $("#msgThread");
     const atBottom = force || box.scrollHeight - box.scrollTop - box.clientHeight < 60;
-    box.innerHTML = msgs.length ? msgs.map(m => msgHtml(m, t)).join("")
+    const ctx = foldReplies(msgs);
+    box.innerHTML = msgs.length ? ctx.shown.map(m => msgHtml(m, t, ctx)).join("")
       : `<div class="empty small"><p>${t?.kind === "dm" ? "No messages with this node yet." : "No messages on this channel yet."}</p></div>`;
     if (atBottom) box.scrollTop = box.scrollHeight;
     $("#msgCfg")?.addEventListener("click", () => VIEWS.config?.open?.("channels"));
@@ -202,3 +239,15 @@ $("#msgNewDm").addEventListener("change", e => { if (e.target.value) VIEWS.messa
 $("#msgText").addEventListener("input", updateBytes);
 $("#msgText").addEventListener("keydown", e => { if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); } });
 $("#msgForm").addEventListener("submit", e => { e.preventDefault(); sendMessage(); });
+
+/* clicking a quote scrolls to the message it quotes */
+$("#msgThread").addEventListener("click", e => {
+  const q = e.target.closest(".quote[data-jump]");
+  if (!q) return;
+  const el = document.getElementById("msg-" + q.dataset.jump);
+  if (!el) return;
+  el.scrollIntoView({ block: "center", behavior: "smooth" });
+  el.classList.remove("flash");
+  void el.offsetWidth;
+  el.classList.add("flash");
+});

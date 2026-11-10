@@ -169,7 +169,9 @@ class PacketProcessor:
                            dm=dm, channel=None if dm else ch_idx, channelName=None if dm else ch_name,
                            hops=hops, snr=snr if source != "mqtt" else None,
                            rssi=rssi if source != "mqtt" else None,
-                           gateway=receiver if source == "mqtt" else None)
+                           gateway=receiver if source == "mqtt" else None,
+                           # a reply names the packet it answers; with "emoji" set the text is a reaction
+                           replyId=decoded.get("replyId") or None, emoji=bool(decoded.get("emoji")) or None)
 
         try:
             if port == "TRACEROUTE_APP":

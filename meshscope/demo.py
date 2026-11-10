@@ -31,6 +31,8 @@ def demo_node_names(seed: int = 7, count: int = 26) -> dict:
     return {num: n["name"] for num, n in d.info.items()}
 
 
+REACTIONS = ["👍", "❤️", "😂", "👀", "✅", "🔥"]
+REPLIES = ["copy that", "heard you loud and clear", "same here", "roger, 2 hops out", "nice, thanks!", "on my way"]
 CHATTER = ["anyone copy?", "checking in from the trailhead", "battery at 40%, heading home",
             "test test", "good morning mesh", "copy, 2 hops", "weather looks rough up north", "ping"]
 
@@ -49,6 +51,8 @@ class DemoRadio(Radio):
     def _transmit_text(self, text, dest, channel):
         """Nothing is transmitted in demo mode; simulate the ACK the firmware would report."""
         pid = self._next_id()
+        if dest == BROADCAST_NUM:
+            self._recent_txt.append((pid, channel or 0))  # others may react or reply to it
 
         def ack():
             time.sleep(self.rng.uniform(1.0, 2.5))
@@ -73,6 +77,7 @@ class DemoRadio(Radio):
         self.count = count
         self._stop = threading.Event()
         self._pkt_id = 1000
+        self._recent_txt = deque(maxlen=12)  # (packet id, channel) of recent channel messages
         self.truth = {}
         self.info = {}
 
@@ -205,7 +210,7 @@ class DemoRadio(Radio):
             "decoded": decoded,
         }
         self.handle_packet(pkt)
-        return True
+        return pkt["id"]
 
     def _next_id(self):
         self._pkt_id += 1
@@ -231,11 +236,21 @@ class DemoRadio(Radio):
             elif roll < 0.36:
                 txt = r.choice(CHATTER)
                 sub = r.random()
-                if sub < 0.15:  # a direct message to us
+                if self._recent_txt and r.random() < 0.35:  # react or reply to a recent channel message
+                    pid, ch = r.choice(list(self._recent_txt))
+                    if r.random() < 0.6:
+                        extra = {"text": r.choice(REACTIONS), "replyId": pid, "emoji": 1}
+                    else:
+                        extra = {"text": r.choice(REPLIES), "replyId": pid}
+                    self._deliver(src, BROADCAST_NUM, "TEXT_MESSAGE_APP", extra["text"].encode(), decoded_extra=extra, channel=ch)
+                elif sub < 0.15:  # a direct message to us
                     self._deliver(src, self.local, "TEXT_MESSAGE_APP", txt.encode(), decoded_extra={"text": txt})
                 else:
-                    self._deliver(src, BROADCAST_NUM, "TEXT_MESSAGE_APP", txt.encode(), decoded_extra={"text": txt},
-                                  channel=1 if sub < 0.4 else 0)
+                    ch = 1 if sub < 0.4 else 0
+                    pid = self._deliver(src, BROADCAST_NUM, "TEXT_MESSAGE_APP", txt.encode(), decoded_extra={"text": txt},
+                                        channel=ch)
+                    if pid:
+                        self._recent_txt.append((pid, ch))
             elif roll < 0.45:
                 self._deliver(src, BROADCAST_NUM, "NODEINFO_APP",
                               decoded_extra={"user": {"longName": n["name"], "shortName": n["short"],

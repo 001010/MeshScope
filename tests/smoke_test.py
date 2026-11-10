@@ -194,6 +194,17 @@ def main():
     call("/api/ui-settings", {"theme": "day"})
     assert json.loads((tmp / "db.json").read_text())["settings"]["ui"] == {"theme": "day", "units": "imperial"}
     print("ui settings ok: theme/units saved, validated, and shown in demo mode")
+    # ---- replies and emoji reactions are recorded with the message they refer to
+    radio = app.radio
+    peer = next(iter(n for n in radio.truth[app.state.local_num]))
+    pid = radio._deliver(peer, 0xFFFFFFFF, "TEXT_MESSAGE_APP", decoded_extra={"text": "smoke original"})
+    radio._deliver(peer, 0xFFFFFFFF, "TEXT_MESSAGE_APP", decoded_extra={"text": "👍", "replyId": pid, "emoji": 1})
+    radio._deliver(peer, 0xFFFFFFFF, "TEXT_MESSAGE_APP", decoded_extra={"text": "smoke reply", "replyId": pid})
+    msgs = call("/api/state")["messages"]
+    react = next(m for m in msgs if m["text"] == "👍" and m.get("replyId") == pid)
+    reply = next(m for m in msgs if m["text"] == "smoke reply")
+    assert react["emoji"] is True and reply["replyId"] == pid and not reply.get("emoji"), (react, reply)
+    print("replies/reactions ok")
     call("/api/disconnect", {})
     srv.shutdown()
 

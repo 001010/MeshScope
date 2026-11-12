@@ -48,10 +48,10 @@ class DemoRadio(Radio):
     def channels(self):
         return [dict(c) for c in self.DEMO_CHANNELS]
 
-    def _transmit_text(self, text, dest, channel):
+    def _transmit_text(self, text, dest, channel, reply_id=None, emoji=False):
         """Nothing is transmitted in demo mode; simulate the ACK the firmware would report."""
         pid = self._next_id()
-        if dest == BROADCAST_NUM:
+        if dest == BROADCAST_NUM and not emoji:
             self._recent_txt.append((pid, channel or 0))  # others may react or reply to it
 
         def ack():

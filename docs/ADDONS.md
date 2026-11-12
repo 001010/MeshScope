@@ -151,6 +151,8 @@ Every function receives `api`, which is how an addon talks to MeshScope:
 | `api.node(x)` | One node, looked up by number or by `"!id"` string; `None` if unknown |
 | `api.name(num)` | A node's display name |
 | `api.send_text(text, to=..., channel=0)` | **Transmits** a text message. Without `to` it goes to everyone on the channel; with `to=` (a node number or `"!id"`) it's a direct message. See [Sending messages safely](#6-sending-messages-safely). |
+| `api.send_text(..., reply_to=packet)` | Same, sent as a reply to a received message (it shows with a quote of that message) |
+| `api.react(packet, emoji)` | **Transmits** an emoji reaction to a received text message, back where it came from: to the sender for a direct message, otherwise to the same channel. Shares the `send_text` rate limit. Example: react to "ping" with the hop count as `0️⃣`–`7️⃣`. |
 | `api.request(kind, node)` | Ask a node for something: `"traceroute"`, `"ping"`, `"nodeinfo"`, `"position"` or `"telemetry"`. The result appears in the Activity tab. |
 
 The same reference is built into the app: open the Addons tab with no addon selected and expand **Addon API reference**.

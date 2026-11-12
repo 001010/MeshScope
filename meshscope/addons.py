@@ -65,7 +65,8 @@ api:
     api.store                   dict saved to disk between runs (api.save() to force)
     api.local_num, api.connected
     api.nodes(), api.node(num_or_"!id"), api.name(num)
-    api.send_text(text, to=BROADCAST, channel=0)   TRANSMITS (max 1 per 10 s per addon)
+    api.send_text(text, to=BROADCAST, channel=0, reply_to=None)   TRANSMITS (max 1 per 10 s per addon)
+    api.react(packet, emoji)    TRANSMITS an emoji reaction to a received text message (same limit)
     api.request(kind, node)     kind: traceroute | ping | nodeinfo | position | telemetry
 
 Each addon runs in its own thread; a slow or crashing addon can't block the others.
@@ -189,18 +190,41 @@ class AddonAPI:
         return self._mgr.app.state.name_of(num)
 
     # -- actions
-    def send_text(self, text: str, to=BROADCAST_NUM, channel: int = 0):
-        """Transmit a text message (rate-limited to one per 10 s per addon)."""
+    def _rate_ok(self, what: str) -> bool:
         now = time.time()
         if now - self._last_send < SEND_MIN_INTERVAL:
-            self.log(f"send_text suppressed: rate limit ({SEND_MIN_INTERVAL:.0f}s between sends)")
+            self.log(f"{what} suppressed: rate limit ({SEND_MIN_INTERVAL:.0f}s between sends)")
             return False
         self._last_send = now
+        return True
+
+    def send_text(self, text: str, to=BROADCAST_NUM, channel: int = 0, reply_to=None):
+        """Transmit a text message (rate-limited to one per 10 s per addon).
+
+        ``reply_to`` may be a received packet (or its id) to send this as a reply to it."""
+        if not self._rate_ok("send_text"):
+            return False
         if isinstance(to, str) and to.startswith("!"):
             to = int(to[1:], 16)
+        reply_id = reply_to.get("id") if isinstance(reply_to, dict) else reply_to
         text = str(text).encode("utf-8")[:200].decode("utf-8", "ignore")
-        self._mgr.app.radio.send_text(text, to, channel)
+        self._mgr.app.radio.send_text(text, to, channel, reply_id=reply_id)
         self.log(f"sent to {self.name(to) if to != BROADCAST_NUM else 'everyone'}: {text}")
+        return True
+
+    def react(self, packet: Dict[str, Any], emoji: str):
+        """Transmit an emoji reaction to a received text message, back where it came from:
+        to the sender for a direct message, otherwise to the same channel. Same rate limit as send_text."""
+        if not packet.get("id"):
+            self.log("react: the packet has no id to react to")
+            return False
+        if not self._rate_ok("react"):
+            return False
+        dm = packet.get("to") == self.local_num
+        to = packet["from"] if dm else BROADCAST_NUM
+        channel = 0 if dm else int(packet.get("channel") or 0)
+        self._mgr.app.radio.send_text(str(emoji), to, channel, reply_id=packet["id"], emoji=True)
+        self.log(f"reacted {emoji} to {packet.get('fromName') or self.name(packet['from'])}: {packet.get('text') or ''}")
         return True
 
     def request(self, kind: str, node):

@@ -361,8 +361,11 @@ class Radio(PacketProcessor):
 
     MAX_TEXT_BYTES = 200
 
-    def send_text(self, text: str, dest: int | str = BROADCAST_NUM, channel: int = 0):
-        """Transmit a text message on a channel (broadcast) or as a DM, and track its ACK."""
+    def send_text(self, text: str, dest: int | str = BROADCAST_NUM, channel: int = 0,
+                  reply_id: Optional[int] = None, emoji: bool = False):
+        """Transmit a text message on a channel (broadcast) or as a DM, and track its ACK.
+
+        ``reply_id`` names the packet this answers; with ``emoji`` the text is a reaction to it."""
         if not self.connected:
             raise RuntimeError("Not connected to a radio")
         text = str(text or "").strip()
@@ -376,20 +379,33 @@ class Radio(PacketProcessor):
         st = self.state
         if channel and not any(c["index"] == channel for c in st.channels):
             raise ValueError(f"Channel {channel} is not enabled on this radio")
-        pkt = self._transmit_text(text, dest, channel)
+        if emoji and reply_id is None:
+            raise ValueError("A reaction needs the id of the message it reacts to")
+        pkt = self._transmit_text(text, dest, channel, reply_id=reply_id, emoji=emoji)
         dm = dest != BROADCAST_NUM
         st.add_message(packetId=pkt.id, **{"from": st.local_num}, to=dest, text=text, src=self.SOURCE,
                        outgoing=True, dm=dm, channel=None if dm else channel,
                        channelName=None if dm else next((c["name"] for c in st.channels if c["index"] == channel), None),
-                       status="sending")
+                       status="sending", replyId=reply_id, emoji=True if emoji else None)
         st.add_log("tx", f'TEXT to {st.name_of(dest) if dm else "everyone"} on ch {channel}: "{text}"',
                    frm=st.local_num, to=dest, port="TEXT_MESSAGE_APP", src=self.SOURCE,
                    path=st.guess_path(st.local_num, dest)[0] if dm else None)
         return pkt
 
-    def _transmit_text(self, text: str, dest: int, channel: int):
+    def _transmit_text(self, text: str, dest: int, channel: int, reply_id: Optional[int] = None, emoji: bool = False):
         with self._send_lock:
-            return self.iface.sendText(text, destinationId=dest, channelIndex=channel, wantAck=True)
+            if not emoji:
+                return self.iface.sendText(text, destinationId=dest, channelIndex=channel, wantAck=True, replyId=reply_id)
+            # the library's sendText can't flag a reaction, so build the packet the same way with Data.emoji set
+            from meshtastic.protobuf import mesh_pb2, portnums_pb2
+            mp = mesh_pb2.MeshPacket()
+            mp.channel = channel
+            mp.decoded.payload = text.encode("utf-8")
+            mp.decoded.portnum = portnums_pb2.PortNum.TEXT_MESSAGE_APP
+            mp.decoded.reply_id = int(reply_id)
+            mp.decoded.emoji = 1
+            mp.id = self.iface._generatePacketId()
+            return self.iface._sendPacket(mp, dest, wantAck=True)
 
     def _send(self, kind: str, target: int, hop_limit: int):
         from meshtastic.protobuf import mesh_pb2, portnums_pb2, telemetry_pb2

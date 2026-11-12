@@ -573,3 +573,17 @@ legend { color: var(--text); font-weight: 600; padding: 0 6px; }
 .emoji-pick button { font-size: 20px; line-height: 1; padding: 5px 6px; border: none; background: none; border-radius: 6px; }
 .emoji-pick button:hover, .emoji-pick button:focus { background: var(--hover); }
 .emoji-pick input { width: 80px; margin-left: 4px; font-size: 13px; }
+
+/* Settings > Clear activity history */
+.settings-pop { max-height: calc(100vh - 80px); overflow-y: auto; }
+.set-row #histOpen { align-self: flex-start; }
+.hist-panel { display: flex; flex-direction: column; gap: 4px; margin-top: 4px; }
+.hist-panel[hidden] { display: none; }
+.hist-list { display: flex; flex-direction: column; gap: 2px; max-height: 240px; overflow-y: auto;
+  border: 1px solid var(--line); border-radius: 8px; padding: 4px; }
+.hist-item { display: flex; align-items: flex-start; gap: 8px; padding: 4px 6px; border-radius: 6px; cursor: pointer; font-size: 13px; }
+.hist-item:hover { background: var(--hover); }
+.hist-item input { margin-top: 3px; }
+.hist-item .hist-sub { display: block; }
+.hist-all { padding-left: 10px; }
+.hist-acts { display: flex; gap: 8px; margin-top: 4px; }

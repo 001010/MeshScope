@@ -108,6 +108,8 @@ def make_handler(app: App):
             if path == "/api/info":
                 return self._json({"version": __version__, "dataDir": str(app.workdir),
                                    "presets": PRESETS, "environments": list(ENVIRONMENTS)})
+            if path == "/api/history":  # radios with stored history (the real radios, also while in demo mode)
+                return self._json({"radios": app.real_state.history_summary()})
             if path == "/api/mynodes":
                 return self._json({"myNodes": app.my_nodes(), "ports": list_ports()})
             if path == "/api/console":
@@ -169,6 +171,13 @@ def make_handler(app: App):
             if path == "/api/clear":
                 st.clear_history()
                 return self._json({"ok": True})
+            if path == "/api/history/clear":
+                radios = body.get("radios")
+                if not isinstance(radios, list) or not radios:
+                    raise ValueError("Pick at least one radio")
+                n = app.real_state.clear_radio_history([None if r is None else int(r) for r in radios])
+                app.real_state.save(force=True)
+                return self._json({"ok": True, "cleared": n, "radios": app.real_state.history_summary()})
             if path == "/api/quit":
                 app.quit_event.set()
                 return self._json({"ok": True})

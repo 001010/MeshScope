@@ -66,6 +66,7 @@ class Radio(PacketProcessor):
         self._connect_lock = threading.Lock()
         self._subscribed = False
         self._connecting = False
+        self._early: List[Any] = []  # (interface, packet) received while connecting
         # hooks set by the App
         self.on_connected: Optional[Callable[[str, Any], None]] = None
         self.on_log_line: Optional[Callable[[str], None]] = None
@@ -112,6 +113,7 @@ class Radio(PacketProcessor):
                     self.state.set_status("connecting", f"Looking for {label or expect_num} on {port}...", port=port)
                 iface = None
                 try:
+                    self._early = []
                     self._connecting = True
                     iface = meshtastic.serial_interface.SerialInterface(devPath=port, timeout=60)
                     num = iface.myInfo.my_node_num if iface.myInfo else None
@@ -120,6 +122,13 @@ class Radio(PacketProcessor):
                     self.iface, self.port = iface, port
                     self._connecting = False
                     self._import_device_state()
+                    early, self._early = self._early, []
+                    for itf, pkt in early:  # packets that arrived while connecting, now in the right history
+                        if itf is None or itf is iface:
+                            try:
+                                self.handle_packet(pkt)
+                            except Exception:
+                                log.exception("Packet handling failed")
                     self.state.set_status("connected", "", port=port)
                     self.state.add_log("conn", f"Connected to {self.state.name_of(self.state.local_num)} on {port}")
                     if self.on_connected:
@@ -153,6 +162,7 @@ class Radio(PacketProcessor):
         st = self.state
         if iface.myInfo is not None:
             st.local_num = iface.myInfo.my_node_num
+            st.switch_profile(st.local_num)  # this radio's own history, not the previous radio's
         try:
             st.hop_limit = int(iface.localNode.localConfig.lora.hop_limit) or 3
         except Exception:
@@ -199,9 +209,14 @@ class Radio(PacketProcessor):
             self.state.set_status("error", "Connection to the radio was lost (cable unplugged?)")
             self.state.add_log("error", "Connection lost")
 
+    def _still_connecting(self) -> bool:
+        return self.iface is None and self._connecting
+
     def _on_node_updated(self, node, interface=None):
         if not self._owns(interface):
             return
+        if self._still_connecting():
+            return  # which radio this is isn't known yet; its whole node list is imported once it is
         try:
             self.state.merge_lib_node(node)
         except Exception:
@@ -210,6 +225,11 @@ class Radio(PacketProcessor):
     def _on_receive(self, packet, interface=None):
         if not self._owns(interface):
             return  # a packet from a connection this Radio doesn't own
+        if self._still_connecting():
+            # hold it until we know which radio this is, so it lands in that radio's history
+            if len(self._early) < 500:
+                self._early.append((interface, packet))
+            return
         try:
             self.handle_packet(packet)
         except Exception:

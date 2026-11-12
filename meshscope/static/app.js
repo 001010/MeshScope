@@ -208,6 +208,58 @@ $("#settingsPop").addEventListener("click", async e => {
   }
 });
 
+/* Settings > Clear activity history: pick radios (or all) and purge their stored history */
+function histItemHtml(r) {
+  const key = r.num == null ? "u" : r.num;
+  const counts = [`${r.nodes} node${r.nodes === 1 ? "" : "s"}`, `${r.messages} message${r.messages === 1 ? "" : "s"}`,
+    `${r.requests} request${r.requests === 1 ? "" : "s"}`].join(" · ");
+  return `<label class="hist-item"><input type="checkbox" data-r="${key}">
+    <span><b>${esc(r.name)}</b>${r.shortName ? ` <span class="muted">(${esc(r.shortName)})</span>` : ""}${r.connected ? ' <span class="tag local">connected</span>' : r.current ? ' <span class="tag">shown</span>' : ""}
+    <span class="muted small hist-sub">${counts}${r.lastUsed ? ` · used ${ago(r.lastUsed)}` : ""}</span></span></label>`;
+}
+function renderHistPanel(radios) {
+  const p = $("#histPanel");
+  p.innerHTML = radios.length
+    ? `<label class="hist-item hist-all"><input type="checkbox" id="histAll"><span><b>Select all</b></span></label>
+       <div class="hist-list">${radios.map(histItemHtml).join("")}</div>
+       <div class="hist-acts"><button type="button" class="danger" id="histClear" disabled>Clear selected</button><button type="button" id="histCancel">Close</button></div>`
+    : `<p class="muted small">No activity history is stored.</p><div class="hist-acts"><button type="button" id="histCancel">Close</button></div>`;
+  p.hidden = false;
+  $("#histOpen").hidden = true;
+}
+function histSelected() { return $$("#histPanel .hist-list input:checked").map(i => i.dataset.r === "u" ? null : +i.dataset.r); }
+function histSync() {
+  const all = $$("#histPanel .hist-list input"), on = all.filter(i => i.checked).length;
+  const a = $("#histAll");
+  if (a) { a.checked = on === all.length && on > 0; a.indeterminate = on > 0 && on < all.length; }
+  const b = $("#histClear");
+  if (b) { b.disabled = !on; b.textContent = on ? `Clear ${on === all.length && on > 1 ? "all " : ""}${on} radio${on === 1 ? "" : "s"}` : "Clear selected"; }
+}
+function closeHistPanel() { $("#histPanel").hidden = true; $("#histPanel").innerHTML = ""; $("#histOpen").hidden = false; }
+$("#histOpen").addEventListener("click", async () => {
+  try { renderHistPanel((await api("/api/history")).radios); }
+  catch (e) { toast("Couldn't load the history list: " + e.message); }
+});
+$("#histPanel").addEventListener("change", e => {
+  if (e.target.id === "histAll") $$("#histPanel .hist-list input").forEach(i => { i.checked = e.target.checked; });
+  histSync();
+});
+$("#histPanel").addEventListener("click", async e => {
+  if (e.target.id === "histCancel") { closeHistPanel(); return; }
+  if (e.target.id !== "histClear") return;
+  const sel = histSelected();
+  if (!sel.length) return;
+  const names = $$("#histPanel .hist-list input:checked").map(i => i.closest(".hist-item").querySelector("b").textContent);
+  if (!confirm(`Clear the activity history of ${names.length === 1 ? names[0] : `${names.length} radios`}?\n\n`
+    + "Their nodes, messages, traceroutes/requests and activity log are deleted from MeshScope. "
+    + "Saved radios (My Nodes) and settings are kept. This can't be undone.")) return;
+  try {
+    const r = await api("/api/history/clear", { radios: sel });
+    toast(`Cleared the history of ${r.cleared} radio${r.cleared === 1 ? "" : "s"}`);
+    renderHistPanel(r.radios);
+  } catch (err) { toast("Not cleared: " + err.message); }
+});
+
 /* ---------------------------------------------------------------- polling */
 async function poll() {
   try {

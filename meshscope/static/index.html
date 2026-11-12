@@ -59,6 +59,12 @@ document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: ligh
       </div>
       <span class="muted small">Distances, heights and areas: km, m, km² or mi, ft, mi².</span>
     </div>
+    <div class="set-row">
+      <span class="set-lab">Activity history</span>
+      <button type="button" id="histOpen">Clear activity history…</button>
+      <span class="muted small">Each USB radio keeps its own nodes, messages, requests and activity. Switching radios shows that radio's history.</span>
+      <div class="hist-panel" id="histPanel" hidden></div>
+    </div>
   </div>
 </header>
 

@@ -112,6 +112,11 @@ class MeshState:
         self._links_ver = 0
         self._adj_cache = None
         self._dirty_since_save = False
+        # Mesh history is kept per USB radio: the live fields above (nodes, links, jobs, log,
+        # messages) belong to radio `profile`; the other radios' history waits in `profiles`
+        # until that radio is connected again. Settings, My Nodes and favourites are shared.
+        self.profile: Optional[int] = None
+        self.profiles: Dict[int, Dict[str, Any]] = {}
         self.load()
 
     # ------------------------------------------------------------------ util
@@ -325,14 +330,119 @@ class MeshState:
             self._touch()
 
     def clear_history(self):
+        """Clear the shown radio's history (keeps the connected radio's own node)."""
         with self._lock:
             keep = {self.local_num} if self.local_num is not None else set()
             self.nodes = {k: v for k, v in self.nodes.items() if k in keep}
             self.links.clear()
             self._links_ver += 1
+            self._adj_cache = None
             self.jobs.clear()
             self.log.clear()
+            self.messages.clear()
             self._touch()
+
+    # ------------------------------------------------------ per-radio history
+    def _pack(self) -> Dict[str, Any]:
+        return {
+            "saved": time.time(),
+            "nodes": list(self.nodes.values()),
+            "links": list(self.links.values()),
+            # a request still waiting can't get its reply once this radio is put away: keep it, unanswered
+            "jobs": [j if j.get("status") not in ("pending", "relayed") else
+                     {**j, "status": "timeout", "summary": "No reply before the radio was disconnected"} for j in self.jobs][:100],
+            "messages": list(self.messages)[-1000:],
+            "log": list(self.log)[-300:],
+        }
+
+    def _unpack(self, d: Dict[str, Any]):
+        self.nodes = {int(n["num"]): n for n in d.get("nodes", [])}
+        self.links = {f"{l['tx']}>{l['rx']}": l for l in d.get("links", [])}
+        self._links_ver += 1
+        self._adj_cache = None
+        self.jobs = [j for j in d.get("jobs", []) if j.get("status") not in ("pending", "relayed")]
+        self.messages = deque(maxlen=MAX_MESSAGES)
+        for m in d.get("messages", []):
+            if m.get("status") == "sending":
+                m["status"] = "noack"
+            self.messages.append(m)
+        self.log = deque(d.get("log", []), maxlen=MAX_LOG)
+        # sequence numbers only ever grow, so the UI never mistakes old entries for new ones
+        self._job_seq = max([self._job_seq] + [j["id"] for j in self.jobs])
+        self._msg_seq = max([self._msg_seq] + [m.get("seq", 0) for m in self.messages])
+        self._log_seq = max([self._log_seq] + [l.get("seq", 0) for l in self.log])
+
+    def _has_history(self) -> bool:
+        return bool(self.links or self.jobs or self.messages or self.log
+                    or any(n for n in self.nodes if n != self.profile))
+
+    def switch_profile(self, num: Optional[int]) -> bool:
+        """Show radio `num`'s history: put the current radio's away and bring back `num`'s last
+        known history (empty for a radio seen for the first time). Returns True if it changed."""
+        if num is None:
+            return False
+        with self._lock:
+            if self.profile == num:
+                return False
+            prev = self.profile
+            if prev is None and not self._has_history():
+                pass  # nothing to keep
+            elif prev is None:
+                # history from before it was kept per radio and of unknown owner: give it to this radio
+                self.profile = num
+                self._touch()
+                return False
+            else:
+                self.profiles[prev] = self._pack()
+            self._unpack(self.profiles.pop(num, {}))
+            self.profile = num
+            if prev is not None:
+                self.add_log("conn", f"Switched radios: showing the history of {self._radio_name(num)} "
+                                     f"(the history of {self._radio_name(prev)} is kept for when it's connected again)")
+            self._touch()
+            return True
+
+    def _radio_name(self, num: Optional[int]) -> str:
+        if num is None:
+            return "an unknown radio"
+        rec = self.my_nodes.get(num, {})
+        n = self.nodes.get(num) or next((x for x in self.profiles.get(num, {}).get("nodes", []) if x.get("num") == num), {})
+        return rec.get("nickname") or rec.get("longName") or n.get("longName") or rec.get("shortName") or node_id(num)
+
+    def history_summary(self) -> List[Dict[str, Any]]:
+        """Every radio MeshScope holds history for, for the Settings > Clear activity history list."""
+        with self._lock:
+            def item(num, d, current):
+                nodes = d["nodes"] if isinstance(d["nodes"], list) else list(d["nodes"].values())
+                rec = self.my_nodes.get(num, {}) if num is not None else {}
+                return {"num": num, "id": node_id(num) if num is not None else None, "name": self._radio_name(num) if num is not None else
+                        "Unassigned (from before history was kept per radio)", "shortName": rec.get("shortName"),
+                        "current": current, "connected": current and self.status == "connected",
+                        "nodes": sum(1 for n in nodes if n.get("num") != num), "messages": len(d["messages"]),
+                        "requests": len(d["jobs"]), "links": len(d["links"]),
+                        "lastUsed": rec.get("lastConnected") or d.get("saved")}
+            out = []
+            if self.profile is not None or self._has_history():
+                out.append(item(self.profile, {"nodes": self.nodes, "messages": self.messages, "jobs": self.jobs,
+                                               "links": self.links, "saved": time.time()}, True))
+            out += [item(num, d, False) for num, d in self.profiles.items()]
+            return out
+
+    def clear_radio_history(self, nums: List[Optional[int]]) -> int:
+        """Purge the stored history of these radios (None = the unassigned history). Returns how many."""
+        n = 0
+        with self._lock:
+            for num in nums:
+                if num == self.profile:
+                    self.clear_history()
+                    n += 1
+                elif num in self.profiles:
+                    del self.profiles[num]
+                    n += 1
+            if n:
+                self.add_log("conn", f"Cleared the activity history of {n} radio{'s' if n != 1 else ''}")
+                self._touch()
+        return n
 
     # -------------------------------------------------------------- messages
     def add_message(self, **m) -> Dict[str, Any]:
@@ -683,19 +793,23 @@ class MeshState:
             data = json.loads(self.db_path.read_text(encoding="utf-8"))
             if data.get("dbVersion") != DB_VERSION:
                 return
-            self.nodes = {int(n["num"]): n for n in data.get("nodes", [])}
-            self.links = {f"{l['tx']}>{l['rx']}": l for l in data.get("links", [])}
-            self.jobs = [j for j in data.get("jobs", []) if j.get("status") not in ("pending", "relayed")]
-            self._job_seq = max([j["id"] for j in self.jobs] + [0])
             self.favorites = set(int(x) for x in data.get("favorites", []))
             self.my_nodes = {int(m["num"]): m for m in data.get("myNodes", [])}
             self.settings = _deep_merge(DEFAULT_SETTINGS, data.get("settings", {}))
-            for m in data.get("messages", []):
-                if m.get("status") == "sending":
-                    m["status"] = "noack"
-                self.messages.append(m)
-            self._msg_seq = max([m.get("seq", 0) for m in self.messages] + [0])
-            log.info("Loaded %d nodes, %d links from %s", len(self.nodes), len(self.links), self.db_path)
+            self.profiles = {int(k): v for k, v in (data.get("profiles") or {}).items()}
+            for d in self.profiles.values():  # keep sequence numbers above everything stored
+                self._job_seq = max([self._job_seq] + [j["id"] for j in d.get("jobs", [])])
+                self._msg_seq = max([self._msg_seq] + [m.get("seq", 0) for m in d.get("messages", [])])
+                self._log_seq = max([self._log_seq] + [l.get("seq", 0) for l in d.get("log", [])])
+            self._unpack(data)
+            if "profile" in data:
+                self.profile = data["profile"]
+            elif self.my_nodes:
+                # a database from before history was kept per radio: it most likely belongs to the
+                # radio connected last (if that's wrong, it can be cleared in Settings)
+                self.profile = max(self.my_nodes.values(), key=lambda r: r.get("lastConnected") or 0)["num"]
+            log.info("Loaded %d nodes, %d links (radio %s, %d other radios) from %s", len(self.nodes), len(self.links),
+                     self.profile, len(self.profiles), self.db_path)
         except Exception:
             log.exception("Could not load database %s", self.db_path)
 
@@ -707,14 +821,12 @@ class MeshState:
                 return
             data = {
                 "dbVersion": DB_VERSION,
-                "saved": time.time(),
-                "nodes": list(self.nodes.values()),
-                "links": list(self.links.values()),
-                "jobs": self.jobs[:100],
+                **self._pack(),  # the shown radio's history: nodes, links, jobs, messages, log
+                "profile": self.profile,
+                "profiles": {str(k): v for k, v in self.profiles.items()},
                 "favorites": sorted(self.favorites),
                 "myNodes": list(self.my_nodes.values()),
                 "settings": self.settings,
-                "messages": list(self.messages)[-1000:],
             }
             self._dirty_since_save = False
         tmp = self.db_path.with_suffix(".tmp")

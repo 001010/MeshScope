@@ -97,11 +97,12 @@ function stepFlow(f, now) {
   if (f.where === "topo" && !f.dot.isConnected) return false; // graph was rebuilt
   if (!active) { removeFlow(f); return false; }
   const segs = (f.where === "map" ? f.pts.length : f.nums.length) - 1;
-  const t = (now - f.start) / HOP_MS;
+  // the frame timestamp can be slightly earlier than the performance.now() a flow started at
+  const t = Math.max(0, now - f.start) / HOP_MS;
   const seg = Math.min(Math.floor(t), segs);
   const frac = seg >= segs ? 1 : t - seg;
   const arrived = t >= segs;
-  const fade = arrived ? Math.min(1, (now - f.start - segs * HOP_MS) / FADE_MS) : 0;
+  const fade = arrived ? Math.min(1, Math.max(0, now - f.start - segs * HOP_MS) / FADE_MS) : 0;
   if (fade >= 1) { removeFlow(f); return false; }
   if (f.where === "map") {
     const a = f.pts[Math.min(seg, segs - 1)], b = f.pts[Math.min(seg + 1, segs)];

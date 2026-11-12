@@ -10,10 +10,15 @@
   --danger: #f87171;
   --warn: #fbbf24;
   --local: #60a5fa;
+  /* hops away: green (heard directly) to red (7 hops, the Meshtastic maximum) */
   --h0: #22c55e;
-  --h1: #14b8a6;
-  --h2: #eab308;
-  --h3: #f97316;
+  --h1: #6cc644;
+  --h2: #a3c935;
+  --h3: #d6c22b;
+  --h4: #f2b01e;
+  --h5: #f68a25;
+  --h6: #f2622f;
+  --h7: #ef4444;
   --hx: #64748b;
   --hover: #1a232d;
   --btn-hover: #243040;

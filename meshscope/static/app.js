@@ -91,7 +91,7 @@ function hopColor(n) {
   if (n.isLocal) return "var(--local)";
   const h = n.hopsAway;
   if (h == null) return "var(--hx)";
-  return ["var(--h0)", "var(--h1)", "var(--h2)"][h] || "var(--h3)";
+  return `var(--h${Math.max(0, Math.min(h, 7))})`;
 }
 const CSSV = name => getComputedStyle(document.documentElement).getPropertyValue(name).trim();
 function hopHex(n) { const c = hopColor(n); return c.startsWith("var(") ? CSSV(c.slice(4, -1)) : c; }
@@ -109,7 +109,9 @@ function shade(hex, f) {
   const ch = [n >> 16, (n >> 8) & 255, n & 255].map(c => Math.round(f < 0 ? c * (1 + f) : c + (255 - c) * f));
   return "#" + ch.map(c => c.toString(16).padStart(2, "0")).join("");
 }
-const REACH_COLORS = ["#60a5fa", "#22c55e", "#84cc16", "#eab308", "#f97316", "#ef4444", "#d946ef", "#a855f7"];
+// reach hop n = n transmissions from the origin, i.e. a node n-1 hops away: same colour as in the node list
+const REACH_COLORS = ["#60a5fa", ...Array.from({ length: 8 }, (_, i) => CSSV(`--h${i}`))];
+const reachColor = h => REACH_COLORS[Math.max(0, Math.min(h, 8))];
 const edgeSnr = e => {
   const v = [e.snrAB, e.snrBA].filter(x => x != null);
   return v.length ? Math.min(...v) : null;
@@ -898,7 +900,7 @@ function drawReach(q) {
       if (!hasPos(n)) continue;
       const rad = r.radiusKm[num] ?? fallback;
       if (!rad) continue;
-      const c = REACH_COLORS[Math.min(h, 7)];
+      const c = reachColor(h);
       L.circle([n.lat, n.lon], {
         radius: rad * 1000, color: shade(c, -0.5), weight: h === 0 ? 3 : 2, opacity: .95,
         fillColor: c, fillOpacity: h === 0 ? .32 : .24, interactive: false,
@@ -909,7 +911,7 @@ function drawReach(q) {
   for (const t of r.tree) {
     const a = S.byNum.get(t.parent), b = S.byNum.get(t.child);
     if (!hasPos(a) || !hasPos(b)) continue;
-    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: REACH_COLORS[Math.min(hops.get(t.child), 7)], weight: 3, opacity: .95 })
+    L.polyline([[a.lat, a.lon], [b.lat, b.lon]], { color: reachColor(hops.get(t.child)), weight: 3, opacity: .95 })
       .bindTooltip(`${esc(nodeName(t.parent))} → ${esc(nodeName(t.child))} (hop ${hops.get(t.child)})`, { sticky: true }).addTo(R.layer);
   }
   // nodes past the hop limit that would hear the final rebroadcast
@@ -930,7 +932,7 @@ function drawReach(q) {
     const n = S.byNum.get(num);
     if (!hasPos(n)) continue;
     pts.push([n.lat, n.lon]);
-    L.circleMarker([n.lat, n.lon], { radius: h === 0 ? 10 : 7, color: "#0b1015", weight: 2, fillColor: REACH_COLORS[Math.min(h, 7)], fillOpacity: 1 })
+    L.circleMarker([n.lat, n.lon], { radius: h === 0 ? 10 : 7, color: "#0b1015", weight: 2, fillColor: reachColor(h), fillOpacity: 1 })
       .bindTooltip(`${esc(shortName(n))}${h ? ` · hop ${h}` : " · origin"}`, { permanent: h === 0 || hops.size < 40, direction: "right", offset: [8, 0], className: "lbl" })
       .on("click", () => selectNode(num)).addTo(R.layer);
   }
@@ -954,7 +956,7 @@ function drawReach(q) {
     </div>
     ${!r.hasLinks ? `<p class="muted small">No radio links have been observed for <b>${esc(r.originName)}</b> yet. Run a traceroute to it, or pick a node that broadcasts NeighborInfo.</p>` : ""}
     ${!hasPos(origin) ? `<p class="muted small">This node has no position, so it can't be drawn on the map, but its flood is still computed.</p>` : ""}
-    ${perHop.length ? `<div class="hopbars">${perHop.map(([h, c]) => `<div><span>hop ${h}</span><span class="bar" style="--c:${REACH_COLORS[Math.min(+h, 7)]};width:${c / maxCount * 100}%"></span><span>${c}</span></div>`).join("")}</div>` : ""}
+    ${perHop.length ? `<div class="hopbars">${perHop.map(([h, c]) => `<div><span>hop ${h}</span><span class="bar" style="--c:${reachColor(+h)};width:${c / maxCount * 100}%"></span><span>${c}</span></div>`).join("")}</div>` : ""}
     ${noPos.length ? `<div><b class="small">Reached, no position (${noPos.length})</b><div class="reach-list">${noPos.map(n => `<div data-select="${n}">hop ${hops.get(n)} · ${esc(nodeName(n))}</div>`).join("")}</div></div>` : ""}`;
   $("#reachLegend").innerHTML = `<b>Hop</b>` + REACH_COLORS.slice(0, +$("#reachHops").value + 1).map((c, i) => `<div><i style="--c:${c};border:2px solid ${shade(c, -0.5)}"></i>${i === 0 ? "origin" : i}</div>`).join("")
     + `<div><i style="--c:transparent;border:2px dashed #cbd5e1;width:12px;height:12px"></i>past limit</div><div><i style="--c:#334155"></i>not reached</div>`;

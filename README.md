@@ -19,7 +19,7 @@ A Windows desktop app for exploring a Meshtastic mesh through a radio connected 
 
 ## Install
 
-Run `dist\MeshScope-<version>-win64.msi`. It installs to `Program Files\MeshScope` and adds Start-menu and desktop shortcuts. Python and the VC++ runtime are bundled in the installer.
+Run `dist\MeshScope-<version>-setup.exe` (or the plain `dist\MeshScope-<version>-win64.msi`, the same installer without the MeshScope icon). It installs to `Program Files\MeshScope` and adds Start-menu and desktop shortcuts. Python and the VC++ runtime are bundled in the installer.
 
 The UI opens in a Microsoft Edge app window, so it has no browser tabs or address bar. Edge ships with Windows 10 and 11. The map tiles need an internet connection; everything else works offline.
 
@@ -63,7 +63,7 @@ Requires Python 3.10+ on Windows.
 powershell -ExecutionPolicy Bypass -File build.ps1
 ```
 
-The script creates `.venv`, installs the dependencies, runs `tests\smoke_test.py` (an end-to-end check of the API over the simulated mesh) and builds `dist\MeshScope-<version>-win64.msi` with cx_Freeze.
+The script creates `.venv`, installs the dependencies, runs `tests\smoke_test.py` (an end-to-end check of the API over the simulated mesh) builds `dist\MeshScope-<version>-win64.msi` with cx_Freeze, then wraps it in `dist\MeshScope-<version>-setup.exe` with the MeshScope icon (`tools\make_setup_exe.py`, using the C# compiler that ships with Windows; an `.msi` file always shows the Windows Installer icon).
 
 To run it without building:
 
@@ -84,7 +84,7 @@ powershell -ExecutionPolicy Bypass -File build.ps1 -Publish   # build, test, the
 .venv\Scripts\python tools\publish_release.py                # publish an already-built MSI
 ```
 
-`publish_release.py` creates the release `v<version>` on the `origin` GitHub repo and attaches `dist\MeshScope-<version>-win64.msi`.
+`publish_release.py` creates the release `v<version>` on the `origin` GitHub repo and attaches `dist\MeshScope-<version>-setup.exe` and `dist\MeshScope-<version>-win64.msi`.
 It signs in with the same GitHub credential `git push` uses (Git Credential Manager) or `$env:GITHUB_TOKEN`, and refuses to publish
 unless the code is committed and pushed. `--replace` re-uploads the installer for an existing release; `--draft` keeps it unpublished.
 

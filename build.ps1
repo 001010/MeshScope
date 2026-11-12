@@ -25,6 +25,10 @@ if ($LASTEXITCODE -ne 0) { throw "MSI build failed" }
 
 Get-ChildItem dist\*.msi | ForEach-Object { Write-Host "Built $($_.FullName) ($([math]::Round($_.Length/1MB,1)) MB)" }
 
+# An .msi always shows the Windows Installer icon, so also wrap it in a setup .exe with the MeshScope icon
+& $py tools\make_setup_exe.py
+if ($LASTEXITCODE -ne 0) { throw "Setup exe build failed" }
+
 if ($Publish) {
     & $py tools\publish_release.py
     if ($LASTEXITCODE -ne 0) { throw "Publishing failed" }

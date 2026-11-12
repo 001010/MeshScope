@@ -3,7 +3,8 @@
     .venv\\Scripts\\python tools\\publish_release.py [--notes "text"] [--target <commit>] [--replace] [--draft]
 
 Creates (or reuses) the release for tag v<version> (from meshscope/__init__.py) on the repo
-behind the `origin` remote, and uploads dist\\MeshScope-<version>-win64.msi to it.
+behind the `origin` remote, and uploads dist\\MeshScope-<version>-setup.exe (the installer with the
+MeshScope icon) and dist\\MeshScope-<version>-win64.msi (the same installer as a plain MSI) to it.
 
 Authentication: uses $GITHUB_TOKEN if set, otherwise asks Git Credential Manager for the
 github.com credential that `git push` already uses. The token is only held in memory; it
@@ -81,8 +82,11 @@ def main():
     version = re.search(r'__version__\s*=\s*"([^"]+)"', (ROOT / "meshscope" / "__init__.py").read_text()).group(1)
     tag = f"v{version}"
     msi = ROOT / "dist" / f"MeshScope-{version}-win64.msi"
-    if not msi.exists():
-        sys.exit(f"{msi} not found - run build.ps1 first")
+    setup_exe = ROOT / "dist" / f"MeshScope-{version}-setup.exe"  # the MSI wrapped with the MeshScope icon
+    for f in (msi, setup_exe):
+        if not f.exists():
+            sys.exit(f"{f} not found - run build.ps1 first")
+    files = [(setup_exe, "application/vnd.microsoft.portable-executable"), (msi, "application/x-msi")]
 
     m = re.search(r"github\.com[:/]([^/]+/[^/]+?)(?:\.git)?$", git("remote", "get-url", "origin"))
     if not m:
@@ -104,29 +108,35 @@ def main():
             prev = [t for t in git("tag", "--list", "v*", "--sort=-v:refname").splitlines() if t != tag]
             rng = f"{prev[0]}..{sha}" if prev else sha
             notes = "\n".join(f"- {s}" for s in git("log", "--format=%s", rng).splitlines()) or f"MeshScope {version}"
-        notes += f"\n\nInstall: download `{msi.name}` and run it. It upgrades an existing MeshScope install in place."
+        notes += (f"\n\nInstall: download `{setup_exe.name}` and run it. It upgrades an existing MeshScope install in place."
+                  f"\n`{msi.name}` is the same installer as a plain Windows Installer package (for managed or scripted installs).")
         rel = gh.call("POST", "/releases", {"tag_name": tag, "target_commitish": sha, "name": f"MeshScope {version}",
                                             "body": notes, "draft": args.draft, "prerelease": False})
         print(f"Created release {tag} at {sha[:7]}")
     else:
         print(f"Using existing release {tag}")
 
+    names = {f.name for f, _ in files}
     for a in rel.get("assets", []):
-        if a["name"] == msi.name:
+        if a["name"] in names:
             if not args.replace:
-                sys.exit(f"{msi.name} is already attached to {tag}: {a['browser_download_url']} (use --replace)")
+                sys.exit(f"{a['name']} is already attached to {tag}: {a['browser_download_url']} (use --replace)")
             gh.call("DELETE", f"/releases/assets/{a['id']}")
-            print("Removed the previous upload")
+            print(f"Removed the previous {a['name']}")
 
-    size = msi.stat().st_size
-    print(f"Uploading {msi.name} ({size / 1e6:.1f} MB)...")
-    up = re.sub(r"\{.*\}$", "", rel["upload_url"]) + "?" + urllib.parse.urlencode({"name": msi.name, "label": msi.name})
-    asset = gh.call("POST", up, data=msi.read_bytes(), ctype="application/x-msi")
-    if asset.get("size") != size:
-        sys.exit(f"Upload size mismatch: sent {size}, GitHub has {asset.get('size')}")
+    urls = []
+    for f, ctype in files:
+        size = f.stat().st_size
+        print(f"Uploading {f.name} ({size / 1e6:.1f} MB)...")
+        up = re.sub(r"\{.*\}$", "", rel["upload_url"]) + "?" + urllib.parse.urlencode({"name": f.name, "label": f.name})
+        asset = gh.call("POST", up, data=f.read_bytes(), ctype=ctype)
+        if asset.get("size") != size:
+            sys.exit(f"Upload size mismatch for {f.name}: sent {size}, GitHub has {asset.get('size')}")
+        urls.append(asset["browser_download_url"])
     git("fetch", "--quiet", "--tags", "origin")
     print(f"Published: {rel['html_url']}")
-    print(f"Installer: {asset['browser_download_url']}")
+    for u in urls:
+        print(f"Installer: {u}")
 
 
 if __name__ == "__main__":

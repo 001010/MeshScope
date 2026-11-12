@@ -188,8 +188,11 @@ def make_handler(app: App):
             # -- messages
             if path == "/api/send":
                 to = body.get("to")
+                reply_id = body.get("replyId")  # answer to that packet; with "emoji" the text is a reaction to it
                 pkt = app.radio.send_text(body.get("text", ""), int(to) if to not in (None, "") else 0xFFFFFFFF,
-                                          int(body.get("channel") or 0))
+                                          int(body.get("channel") or 0),
+                                          reply_id=int(reply_id) if reply_id not in (None, "") else None,
+                                          emoji=bool(body.get("emoji")))
                 return self._json({"ok": True, "packetId": pkt.id})
             # -- node configuration
             if path == "/api/config/apply":

@@ -550,3 +550,26 @@ legend { color: var(--text); font-weight: 600; padding: 0 6px; }
 .trace-arrow { background: none; border: none; }
 .trace-arrow svg { display: block; overflow: visible; }
 #map.tracing .leaflet-overlay-pane { opacity: .6; }
+
+/* message actions: reply / react */
+.msg { position: relative; }
+.msg-acts { position: absolute; top: -12px; right: 6px; z-index: 2; display: none; gap: 2px; padding: 2px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 8px; box-shadow: 0 2px 8px var(--shadow); }
+.msg.out .msg-acts { right: auto; left: 6px; }
+.msg:hover .msg-acts, .msg.sel .msg-acts, .msg-acts:focus-within { display: flex; }
+.msg-acts button { font-size: 12px; padding: 2px 8px; border: none; background: none; }
+.msg-acts button:hover { background: var(--hover); }
+.msg[data-seq]:has(.msg-acts) { cursor: pointer; }
+.msg.sel .body { outline: 2px solid var(--accent); outline-offset: 1px; }
+.msg-replybar { display: flex; align-items: center; gap: 6px; padding: 6px 12px; border-top: 1px solid var(--line);
+  background: var(--panel-2); font-size: 12px; color: var(--muted); }
+.msg-replybar[hidden] { display: none; }
+.msg-replybar b { color: var(--text); white-space: nowrap; }
+.msg-replybar .txt { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.msg-replybar .x { padding: 0 8px; font-size: 15px; line-height: 20px; }
+.emoji-pick { position: fixed; z-index: 2000; display: flex; flex-wrap: wrap; align-items: center; gap: 2px; padding: 4px;
+  background: var(--panel); border: 1px solid var(--line); border-radius: 10px; box-shadow: 0 6px 20px var(--shadow); max-width: 340px; }
+.emoji-pick[hidden] { display: none; }
+.emoji-pick button { font-size: 20px; line-height: 1; padding: 5px 6px; border: none; background: none; border-radius: 6px; }
+.emoji-pick button:hover, .emoji-pick button:focus { background: var(--hover); }
+.emoji-pick input { width: 80px; margin-left: 4px; font-size: 13px; }

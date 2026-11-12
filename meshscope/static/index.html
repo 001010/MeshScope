@@ -134,6 +134,8 @@ document.documentElement.dataset.theme = matchMedia("(prefers-color-scheme: ligh
       <div class="msg-main">
         <div class="msg-head" id="msgHead"></div>
         <div class="msg-thread" id="msgThread"></div>
+        <div class="msg-replybar" id="msgReply" hidden></div>
+        <div class="emoji-pick" id="emojiPick" hidden role="dialog" aria-label="React with an emoji"></div>
         <form class="msg-compose" id="msgForm" autocomplete="off">
           <textarea id="msgText" rows="2" maxlength="400"></textarea>
           <div class="msg-side"><span id="msgBytes" class="muted small">0/200</span><button class="primary" id="msgSend" type="submit">Send</button></div>

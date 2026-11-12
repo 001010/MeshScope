@@ -549,4 +549,4 @@ legend { color: var(--text); font-weight: 600; padding: 0 6px; }
 .trace-panel .small { margin-top: 4px; }
 .trace-arrow { background: none; border: none; }
 .trace-arrow svg { display: block; overflow: visible; }
-#map.tracing .leaflet-overlay-pane { opacity: .3; }
+#map.tracing .leaflet-overlay-pane { opacity: .6; }

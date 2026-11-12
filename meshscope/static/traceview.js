@@ -6,6 +6,7 @@
 const TR = { job: null, layer: null, renderer: null };
 const TR_TO = "#38bdf8", TR_BACK = "#e879f9";
 const TR_LANE_PX = 5;
+const TR_NODE_GAP_PX = 11; // a little more than a node marker's radius
 
 function traceJob(id) {
   return (S.snap?.jobs || []).find(j => j.id === id && j.kind === "traceroute" && j.result);
@@ -56,20 +57,20 @@ function arrowIcon(color, deg) {
   });
 }
 
-function drawLeg(hops, color, label) {
+function drawLeg(hops, color) {
   const map = M.map;
   for (const s of traceSegments(hops)) {
     const pa = map.latLngToLayerPoint(s.la), pb = map.latLngToLayerPoint(s.lb);
     const dx = pb.x - pa.x, dy = pb.y - pa.y, len = Math.hypot(dx, dy) || 1;
     const off = L.point(-dy / len * TR_LANE_PX, dx / len * TR_LANE_PX); // right of travel (screen y points down)
-    const a = map.layerPointToLatLng(pa.add(off)), b = map.layerPointToLatLng(pb.add(off));
+    // stop short of both nodes so the node markers stay easy to hover and click
+    const trim = Math.min(TR_NODE_GAP_PX, len / 3), dir = L.point(dx / len * trim, dy / len * trim);
+    const a = map.layerPointToLatLng(pa.add(off).add(dir)), b = map.layerPointToLatLng(pb.add(off).subtract(dir));
     const gap = s.skipped.length > 0;
-    const tip = `${label} hop ${s.hop}: ${esc(s.a.name)} → ${esc(s.b.name)}`
-      + (s.b.snr != null ? ` · ${s.b.snr.toFixed(1)} dB` : "")
-      + (gap ? `<br><span class="muted">via ${s.skipped.map(h => esc(h.name)).join(", ")} (no position)</span>` : "");
+    // nothing on this layer takes the mouse: it's drawn above the nodes, and they must stay hoverable
+    // and clickable wherever a route passes (each hop's SNR is listed in the panel instead)
     L.polyline([a, b], { renderer: TR.renderer, color: "#0b1015", weight: 7, opacity: .55, interactive: false }).addTo(TR.layer);
-    L.polyline([a, b], { renderer: TR.renderer, color, weight: 4, opacity: .95, dashArray: gap ? "8 7" : null })
-      .bindTooltip(tip, { sticky: true }).addTo(TR.layer);
+    L.polyline([a, b], { renderer: TR.renderer, color, weight: 4, opacity: .95, dashArray: gap ? "8 7" : null, interactive: false }).addTo(TR.layer);
     const deg = Math.atan2(dy, dx) * 180 / Math.PI;
     const n = len > 220 ? 3 : len > 110 ? 2 : 1; // more arrows on long links
     for (let k = 1; k <= n; k++) {
@@ -86,8 +87,8 @@ function drawTrace(fit) {
   TR.layer.clearLayers();
   TR.key = traceKey();
   const { towards, back } = TR.job.result;
-  drawLeg(towards, TR_TO, "Towards");
-  if (back) drawLeg(back, TR_BACK, "Back");
+  drawLeg(towards, TR_TO);
+  if (back) drawLeg(back, TR_BACK);
   $("#map").classList.add("tracing");
 
   const all = [...towards, ...(back || [])];
@@ -103,7 +104,13 @@ function drawTrace(fit) {
     ${missing.length ? `<div class="muted small">Not on the map (no position): ${missing.map(h => esc(h.name)).join(", ")}. Dashed lines skip them.</div>` : ""}
     ${new Set(placed.map(n => n.num)).size < 2 ? `<div class="muted small">Too few nodes on this route have a position to draw it.</div>` : ""}`;
   p.hidden = false;
-  if (fit && placed.length >= 2) M.map.fitBounds(L.latLngBounds(placed.map(n => [n.lat, n.lon])), { padding: [60, 60], maxZoom: 15 });
+  if (fit && placed.length >= 2) {
+    // keep the route clear of the panel in the top-left corner: beside it on a wide map, below it otherwise
+    const sz = M.map.getSize(), beside = sz.x - p.offsetWidth > 420;
+    M.map.fitBounds(L.latLngBounds(placed.map(n => [n.lat, n.lon])), {
+      paddingTopLeft: beside ? [p.offsetLeft + p.offsetWidth + 40, 50] : [50, p.offsetTop + p.offsetHeight + 40],
+      paddingBottomRight: [50, 50], maxZoom: 15 });
+  }
 }
 
 document.addEventListener("click", e => {

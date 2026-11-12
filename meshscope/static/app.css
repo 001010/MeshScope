@@ -528,3 +528,25 @@ legend { color: var(--text); font-weight: 600; padding: 0 6px; }
 .msg.emoji .body { font-size: 20px; padding: 2px 10px; }
 .msg.flash .body { animation: msgflash 1.2s ease-out; }
 @keyframes msgflash { from { box-shadow: 0 0 0 3px var(--accent); } to { box-shadow: 0 0 0 3px transparent; } }
+
+/* version badge under the name */
+.brand-txt { display: flex; flex-direction: column; line-height: 1.1; }
+.brand .ver { align-self: flex-start; margin-top: 2px; font-size: 10px; font-weight: 600; letter-spacing: .2px; color: var(--muted);
+  background: var(--panel-2); border: 1px solid var(--line); border-radius: 999px; padding: 0 6px; line-height: 15px; }
+.brand .ver:empty { display: none; }
+
+/* traceroute view on the map */
+.job .hd button[data-trace] { margin-left: auto; }
+.trace-panel { position: absolute; top: 12px; left: 56px; z-index: 650; max-width: min(580px, calc(100% - 80px));
+  background: var(--overlay); border: 1px solid var(--line); border-radius: 8px; padding: 8px 10px; font-size: 12px;
+  box-shadow: 0 4px 16px var(--shadow); }
+.trace-panel .tp-hd { display: flex; align-items: center; gap: 8px; margin-bottom: 2px; }
+.trace-panel .tp-hd b { font-size: 13px; }
+.trace-panel .tp-x { margin-left: auto; padding: 0 8px; font-size: 16px; line-height: 22px; }
+.trace-panel .tp-key { display: flex; align-items: center; gap: 6px; margin-top: 4px; }
+.trace-panel .tp-key s { width: 22px; height: 4px; border-radius: 2px; background: var(--c); display: inline-block; }
+.trace-panel .route { margin-top: 4px; }
+.trace-panel .small { margin-top: 4px; }
+.trace-arrow { background: none; border: none; }
+.trace-arrow svg { display: block; overflow: visible; }
+#map.tracing .leaflet-overlay-pane { opacity: .3; }

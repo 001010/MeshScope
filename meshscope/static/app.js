@@ -226,6 +226,11 @@ async function poll() {
         // #<tab>/!xxxxxxxx opens that node's details; #reach/heat opens and runs the heatmap
         const nodeNum = /^![0-9a-f]{8}$/i.test(sub || "") ? parseInt(sub.slice(1), 16) : null;
         if (nodeNum != null && S.byNum.has(nodeNum)) { S.selected = nodeNum; renderDrawer(); }
+        // #map/trace[/<job id>] shows a traceroute (the latest finished one if no id)
+        if (t === "map" && sub === "trace") {
+          const id = +decodeURIComponent(location.hash.slice(1)).split("/")[2] || S.snap.jobs.find(j => j.kind === "traceroute" && j.result)?.id;
+          if (id) showTrace(id);
+        }
         if (t === "reach" && sub === "heat") { $("#heatPanel").open = true; setTimeout(() => $("#heatRun").click(), 1500); }
       }
     }
@@ -1028,10 +1033,11 @@ function routeHtml(label, hops) {
     `${i ? `<span class="arrow" style="color:${snrColor(h.snr)}">→${h.snr != null ? ` ${h.snr.toFixed(1)}dB` : ""}</span>` : ""}<span class="hop" data-select="${h.num}">${esc(h.name)}</span>`).join("")}</div>`;
 }
 function jobHtml(j) {
-  const res = j.kind === "traceroute" && j.result ? routeHtml("to", j.result.towards) + routeHtml("back", j.result.back) : "";
+  const tr = j.kind === "traceroute" && j.result;
+  const res = tr ? routeHtml("to", j.result.towards) + routeHtml("back", j.result.back) : "";
   return `<div class="job ${j.status}">
     <div class="hd"><span class="kind">${esc(j.kind)}</span><span data-select="${j.target}" style="cursor:pointer">${esc(j.targetName)}</span>
-      <span class="when">${clock(j.started)} · ${esc(j.status)}</span></div>
+      <span class="when">${clock(j.started)} · ${esc(j.status)}</span>${tr ? `<button class="small" data-trace="${j.id}" title="Show this route on the map">View on map</button>` : ""}</div>
     <div class="sum">${esc(j.summary)}</div>${res}</div>`;
 }
 function renderActivity() {
@@ -1074,6 +1080,7 @@ async function loadInfo() {
   try {
     S.info = await api("/api/info");
     $(".brand span").title = `MeshScope ${S.info.version}`;
+    $("#appVersion").textContent = "v" + S.info.version;
     $("#heatPreset").innerHTML = Object.entries(S.info.presets).map(([k, p]) => `<option value="${k}" ${k === "LONG_FAST" ? "selected" : ""}>${esc(p.label)}</option>`).join("");
   } catch (e) { console.error(e); }
 }
